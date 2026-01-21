@@ -5,9 +5,14 @@ An underwater robot that identifies, navigates to, and retrieves an object from 
 # Backlog
 
 # Todo
- - Write simple navigation package for ascending and descending the robot in the pool
+ - Get video stream from camera
+ - Write/test lawnmower search algorithm
 # Ongoing
- - Test remote control in water
- - Establish remote control via command line in terminal
+ - Work to get all relevant control within scope of control package
+ - Get simulation working
 # Done 
  - Test remote control in air
+ - Establish remote control in water
+ - Gain control over commands in ROS:
+   - Gripper
+ 
