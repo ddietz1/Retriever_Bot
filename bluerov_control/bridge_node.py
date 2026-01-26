@@ -1,19 +1,19 @@
 '''Module for creating the ros->ArduSub bridge.
 '''
 
-from enum import auto, Enum
-# from geometry_msgs.msg import PoseStamped, Quaternion, TransformStamped
-from geometry_msgs.msg import Twist, Vector3, TwistStamped
-
-from std_msgs.msg import Empty, Float32
-
+from enum import Enum, auto
+import math
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSDurabilityPolicy, QoSProfile
-
 from rclpy.duration import Duration
-from rclpy.time import Time
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy
+
+from geometry_msgs.msg import Twist, TwistStamped
+from mavros_msgs.msg import ManualControl
 from mavros_msgs.srv import CommandLong
+
+from std_msgs.msg import Float32
+from std_srvs.srv import Empty
 
 
 class State(Enum):
@@ -35,9 +35,10 @@ class Bridge(Node):
 
         # Declare constants
         self.brightness = 0  # default off
-        self.lights_RC_Channel = 9
-        self.light_servo = 9
-        self.light_hz = 10.0
+        self.gripper_open = False  # default closed
+        self.adjusting_grip = False  # Needed for servo callback
+        self.servo_cmd = False
+
         # Declare params
         self.declare_parameter('publish_rate_hz', 20.0)
         self.declare_parameter('cmd_timeout_s', 0.4)
@@ -47,43 +48,44 @@ class Bridge(Node):
         self.declare_parameter('max_heave', 0.3)
         self.declare_parameter('max_yaw_rate', 0.5)  # rad/s
 
-        self.declare_parameter('lights_pwm_min', 1100)
-        self.declare_parameter('lights_pwm_max', 1900)
-        self.declare_parameter('lights_servo', 11)
+        self.declare_parameter('servo_pwm_min', 1100)
+        self.declare_parameter('servo_pwm_max', 1900)
+        self.declare_parameter('lights_servo', 12)
+        self.declare_parameter('gripper_servo', 11)  # Servo 11 function set to Gripper via BlueOS
+
+        self.declare_parameter('z_neutral', 500)
 
         # Get params
-        self.get_parameter('publish_rate_hz').value
+        rate = self.get_parameter('publish_rate_hz').value
         self.cmd_timeout = Duration(
             seconds=self.get_parameter('cmd_timeout_s').value
         )
-
         self.max_surge = self.get_parameter('max_surge').value
         self.max_sway = self.get_parameter('max_sway').value
         self.max_heave = self.get_parameter('max_heave').value
-        self.max_yaw_rate = self.get_parameter('max_yaw_rate').value
+        self.max_yaw = self.get_parameter('max_yaw_rate').value
+        self.z_neutral = int(self.get_parameter('z_neutral').value)
 
         self.last_cmd = Twist()
         self.last_cmd_time = None
         self.lights_dirty = True
         self.last_sent_pwm = None
 
+        self.cal_active = False
+        self.cal_step = 0
+        self.cal_step_start = None
+        self.cal_cmd = Twist()
+
         markerQoS = QoSProfile(
             depth=10,
             durability=QoSDurabilityPolicy.VOLATILE)
 
         # Create publishers
-        self.vel_pub = self.create_publisher(
-            TwistStamped,
-            '/mavros/setpoint_velocity/cmd_vel',
+        self.manual_pub = self.create_publisher(
+            ManualControl,
+            '/mavros/manual_control/send',
             markerQoS
         )
-
-        # self.light_brightness = self.create_publisher(
-        #     OverrideRCIn,
-        #     '/mavros/rc/override',
-        #     markerQoS
-        # )
-
         # Create subscriptions
         self.vel_sub = self.create_subscription(
             Twist,
@@ -99,36 +101,51 @@ class Bridge(Node):
             markerQoS
         )
 
-        # Create services
-        # Service for setting servo to toggle lights
-        # self.toggle_lights_srv = self.create_service(
-        #     CommandLong,
-        #     'toggleLights',
-        #     self.toggle_lights
-        # )
-
         # Create Clients
         self.cmd_cli = self.create_client(CommandLong, '/mavros/cmd/command')
+
+        # Create Services
+        self.open_grip = self.create_service(
+            Empty,
+            '/bluerov/open_gripper',
+            self.open_gripper
+        )
+
+        self.close_grip = self.create_service(
+            Empty,
+            '/bluerov/close_gripper',
+            self.close_gripper
+        )
+        self.calibrate = self.create_service(
+            Empty,
+            '/bluerov/calibrate',
+            self.calibrate_bot
+        )
         # Create Timers
-        self.vel_timer = self.create_timer(
-            1/50,
+        self.manual_timer = self.create_timer(
+            1/rate,
             self.publish_vel_commands
         )
 
         self.light_timer = self.create_timer(
             1/10,
-            self.send_lights_command
+            self.send_servo_command
         )
+
+    # Map Twist -> ManualControl
+    # x, y, r in [-1000, 1000]
+    # z in [0, 1000] with neutral at z_neutral (typically 500)
+    def scale_pm1000(self, value, max_value):
+        if max_value <= 1e-6:
+            return 0
+        return float(round(1000.0 * (value / max_value)))
+
+    def clamp_float(self, v, lo, hi):
+        return float(max(lo, min(hi, v)))
 
     def limit_vel(self, val, limit):
         return max(-limit, min(limit, val))
 
-    # def toggle_lights(self, request, response):
-    #     """Turn lights on/off."""
-    #     self.brightness = request.data
-    #     pwm = 1100 + int(self.brightness) * (1900 - 1100)
-    #     cmd = CommandLong()
-        
     def rov_twist_sub(self, msg: Twist):
         """Subscribe to twist messages from user."""
         self.last_cmd = msg
@@ -137,25 +154,33 @@ class Bridge(Node):
     def lights_callback(self, msg: Float32):
         b = float(msg.data)
         self.brightness = max(0.0, min(1.0, b))
-        self.lights_dirty = True
-    
-    def send_lights_command(self):
-        if not self.lights_dirty:
-            return
+        self.servo_cmd = True
 
+    def send_servo_command(self):
+        if not self.servo_cmd:
+            return
         # wait for MAVROS service to exist
         if not self.cmd_cli.service_is_ready():
             # don’t spam logs; log occasionally if you want
             return
 
-        pwm = self.brightness_to_pwm()
+        if self.adjusting_grip:
+            if self.gripper_open:
+                pwm = 1900.0
+            else:
+                pwm = 1100.0
+        else:
+            pwm = self.float_to_pwm()
 
         # Optional: only send if changed
+        # TODO Adjust this when lights are set up
         if self.last_sent_pwm is not None and pwm == self.last_sent_pwm:
-            self.lights_dirty = False
+            self.servo_cmd = False
             return
-
-        servo_out = int(self.get_parameter('lights_servo').value)
+        if self.adjusting_grip:
+            servo_out = int(self.get_parameter('gripper_servo').value)
+        else:
+            servo_out = int(self.get_parameter('lights_servo').value)
 
         req = CommandLong.Request()
         req.command = 183  # MAV_CMD_DO_SET_SERVO
@@ -171,44 +196,112 @@ class Bridge(Node):
         self.cmd_cli.call_async(req)
 
         self.last_sent_pwm = pwm
-        self.lights_dirty = False
+        self.servo_cmd = False
+        self.adjusting_grip = False
 
-    def brightness_to_pwm(self) -> int:
-        pwm_min = int(self.get_parameter('lights_pwm_min').value)
-        pwm_max = int(self.get_parameter('lights_pwm_max').value)
-        pwm = pwm_min + int(round(self.brightness * (pwm_max - pwm_min)))
+    def float_to_pwm(self) -> float:
+        pwm_min = int(self.get_parameter('servo_pwm_min').value)
+        pwm_max = int(self.get_parameter('servo_pwm_max').value)
+        pwm = pwm_min + round(self.brightness * (pwm_max - pwm_min))
         return max(pwm_min, min(pwm_max, pwm))
+    
+    def open_gripper(self, request, response):
+        """Service callback to publish servo commands to open the gripper."""
+        self.gripper_open = True
+        self.adjusting_grip = True
+        self.servo_cmd = True
+        return response
 
-    # def publish_brightness(self):
-    #     pwm = 1100 + int(self.brightness) * (1900 - 1100)
-    #     msg = OverrideRCIn()
-    #     msg.channels = [0] * 18
-    #     msg.channels[self.lights_RC_Channel] = pwm
-    #     self.light_brightness.publish(msg)
+    def close_gripper(self, request, response):
+        """Service callback to publish servo commands to open the gripper."""
+        self.gripper_open = False
+        self.adjusting_grip = True
+        self.servo_cmd = True
+        return response
+
+    def calibrate_bot(self, request, response):
+        """Simple calibration routine, consists of the following commands
+        1. Decend for 1 second
+        2. Move right for 1 second
+        3. Move left for 1 second
+        4. Move forward for 1 second
+        5. Move backward for 1 second
+        6. Ascend for 1 second
+
+        """
+        self.cal_active = True
+        self.cal_step = 0
+        self.cal_step_start = self.get_clock().now()
+        self.get_logger().info('Starting calibration...')
+        return response
+
+    def _calibration_twist(self, now):
+        if self.cal_step_start is None:
+            self.cal_step_start = now
+
+        elapsed = (now - self.cal_step_start).nanoseconds * 1e-9
+
+        # Advance step every 1.0s
+        if elapsed >= 2.0:
+            self.cal_step += 1
+            self.cal_step_start = now
+            elapsed = 0.0
+
+        if self.cal_step >= 6:
+            self.cal_active = False
+            self.get_logger().info('Calibration finished')
+            return Twist()  # zero
+
+        z = 0.10
+        x = 0.10
+        y = 0.10
+
+        cmd = Twist()
+        if self.cal_step == 0:
+            cmd.linear.z = +z   # ascend
+        elif self.cal_step == 1:
+            cmd.linear.z = -z   # descend
+        elif self.cal_step == 2:
+            cmd.linear.x = +x   # forward
+        elif self.cal_step == 3:
+            cmd.linear.x = -x   # back
+        elif self.cal_step == 4:
+            cmd.linear.y = +y   # right
+        elif self.cal_step == 5:
+            cmd.linear.y = -y   # left
+        return cmd
 
     def publish_vel_commands(self):
-        """Timer callback."""
+        """Timer callback: publish MANUAL_CONTROL based on last Twist."""
         now = self.get_clock().now()
 
-        # Publish zero vel if last command has timed out
-        if self.last_cmd_time is None or \
-                (now - self.last_cmd_time) > self.cmd_timeout:
-            cmd = Twist()  # Create a zero Twist to publish
+        if self.cal_active:
+            cmd = self._calibration_twist(now)
         else:
-            cmd = self.last_cmd
+            # Watchdog: if stale, command neutral
+            if self.last_cmd_time is None or (now - self.last_cmd_time) > self.cmd_timeout:
+                cmd = Twist()
+            else:
+                cmd = self.last_cmd
 
+        # Clamp incoming Twist
         cmd.linear.x = self.limit_vel(cmd.linear.x, self.max_surge)
         cmd.linear.y = self.limit_vel(cmd.linear.y, self.max_sway)
         cmd.linear.z = self.limit_vel(cmd.linear.z, self.max_heave)
-        cmd.angular.z = self.limit_vel(cmd.angular.z, self.max_yaw_rate)
+        cmd.angular.z = self.limit_vel(cmd.angular.z, self.max_yaw)
 
-        # Publish commands
-        out = TwistStamped()
-        out.header.stamp = now.to_msg()
-        out.header.frame_id = 'base_link'
-        out.twist = cmd
+        mc = ManualControl()
+        mc.x = self.clamp_float(self.scale_pm1000(cmd.linear.x, self.max_surge), -1000, 1000)
+        mc.y = self.clamp_float(self.scale_pm1000(cmd.linear.y, self.max_sway),  -1000, 1000)
+        mc.r = self.clamp_float(self.scale_pm1000(cmd.angular.z, self.max_yaw),  -1000, 1000)
+        # self.get_logger().info(f'mc is {mc}')
 
-        self.vel_pub.publish(out)
+        # heave maps to +/-500 around neutral
+        dz = 0.0 if self.max_heave <= 1e-6 else 500.0 * float(cmd.linear.z / self.max_heave)
+        mc.z = self.clamp_float(float(self.z_neutral) + dz, 0.0, 1000.0)
+
+        mc.buttons = int(0)   # must be int/uint16
+        self.manual_pub.publish(mc)
 
 
 def main():
@@ -221,4 +314,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-        

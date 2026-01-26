@@ -28,7 +28,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'bridge_node = bluerov_control.bridge_node:main'
+            'bridge_node = bluerov_control.bridge_node:main',
+            'camera_node = bluerov_control.camera_node:main'
         ],
     },
 )
