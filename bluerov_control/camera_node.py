@@ -16,7 +16,7 @@ PIPELINE = (
     'udpsrc port=5602 '
     'caps="application/x-rtp,media=video,encoding-name=JPEG,payload=96,clock-rate=90000" ! '
     'rtpjpegdepay ! jpegdec ! videoconvert ! videoscale ! '
-    'video/x-raw,format=BGR,width=640,height=360 ! '
+    'video/x-raw,format=BGR,width=1280,height=720 ! '
     'appsink name=sink emit-signals=true drop=true max-buffers=2 sync=false'
 )
 
@@ -47,7 +47,7 @@ class MJPEGCameraNode(Node):
         
         # JPEG compression quality (0-100, higher = better quality but larger size)
         # 80 is a good balance, adjust if needed
-        self.jpeg_quality = 80
+        self.jpeg_quality = 95
 
         Gst.init(None)
         self.pipeline = Gst.parse_launch(PIPELINE)

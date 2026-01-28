@@ -22,7 +22,7 @@ class GreenRingDetector(Node):
 
         self.bridge = CvBridge()
 
-        # Subscribe to compressed images instead of raw
+        # Subscribe to image
         self.sub = self.create_subscription(
             CompressedImage, 
             "/bluerov/camera/image_raw/compressed", 
@@ -36,14 +36,21 @@ class GreenRingDetector(Node):
         self.pub_area = self.create_publisher(Float32, "/bluerov/ring/area_norm", 10)
 
         # Tunable HSV thresholds for a green pool ring
-        self.h_low = 30
-        self.h_high = 90
-        self.s_low = 40
-        self.v_low = 30
+        # self.h_low = 35
+        # self.h_high = 80
+        # self.s_low = 45
+        # self.v_low = 35
+        # Trying Orange
+        self.h_low = 5
+        self.h_high = 30
+        self.s_low = 70
+        self.v_low = 70
 
         # Optional: ignore tiny detections
-        self.min_area_px = 500
-        
+        self.min_area_px = 800
+
+        # Ignore large detections as well
+        self.max_area_px = 1500
         # Diagnostic counter
         self.frame_count = 0
 
@@ -57,9 +64,9 @@ class GreenRingDetector(Node):
             return
         
         # Diagnostics
-        self.frame_count += 1
-        if self.frame_count % 30 == 0:
-            self.get_logger().info(f"Detection received 30 frames")
+        # self.frame_count += 1
+        # if self.frame_count % 30 == 0:
+        #     self.get_logger().info(f"Detection received 30 frames")
         
         h, w = frame.shape[:2]
 
@@ -97,7 +104,7 @@ class GreenRingDetector(Node):
         c = max(contours, key=cv2.contourArea)
         area = float(cv2.contourArea(c))
 
-        if area < self.min_area_px:
+        if (self.max_area_px < area < self.min_area_px):
             self.pub_ex.publish(Float32(data=0.0))
             self.pub_ey.publish(Float32(data=0.0))
             self.pub_area.publish(Float32(data=0.0))

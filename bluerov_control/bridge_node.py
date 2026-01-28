@@ -9,7 +9,7 @@ from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy
 
 from geometry_msgs.msg import Twist, TwistStamped
-from mavros_msgs.msg import ManualControl
+from mavros_msgs.msg import ManualControl, OverrideRCIn
 from mavros_msgs.srv import CommandLong
 
 from std_msgs.msg import Float32
@@ -34,11 +34,11 @@ class Bridge(Node):
         super().__init__('bridge_node')
 
         # Declare constants
-        self.brightness = 0  # default off
+        self.brightness = 0.0  # default off
         self.pitch_angle = 0.0
         self.gripper_open = False  # default closed
         self.adjusting_grip = False  # Needed for gripper servo callback
-        self.adjusting_pitch = False # Needed for pitch servo callback
+        self.adjusting_pitch = False  # Needed for pitch servo callback
         self.servo_cmd = False
 
         # Declare params
@@ -52,11 +52,11 @@ class Bridge(Node):
 
         self.declare_parameter('servo_pwm_min', 1100)
         self.declare_parameter('servo_pwm_max', 1900)
-        self.declare_parameter('lights_servo', 12)
-        self.declare_parameter('gripper_servo', 11)  # Servo 11 function set to Gripper via BlueOS
+
+        # Servo 11 function set to Gripper via BlueOS
+        self.declare_parameter('gripper_servo', 11)
         # Trying to pitch the camera mount
         self.declare_parameter('mount_servo', 14)
-
         self.declare_parameter('z_neutral', 500)
 
         # Get params
@@ -90,18 +90,17 @@ class Bridge(Node):
             '/mavros/manual_control/send',
             markerQoS
         )
+
+        self.lights_pub = self.create_publisher(
+            OverrideRCIn,
+            '/mavros/rc/override',
+            markerQoS
+        )
         # Create subscriptions
         self.vel_sub = self.create_subscription(
             Twist,
             '/bluerov/cmd_vel',
             self.rov_twist_sub,
-            markerQoS
-        )
-
-        self.lights_sub = self.create_subscription(
-            Float32,
-            '/bluerov/brightness',
-            self.lights_callback,
             markerQoS
         )
 
@@ -121,6 +120,12 @@ class Bridge(Node):
             self.close_gripper
         )
 
+        self.toggle_lights = self.create_service(
+            Empty,
+            '/bluerov/set_lights',
+            self.lights_callback
+        )
+
         self.calibrate = self.create_service(
             Empty,
             '/bluerov/calibrate',
@@ -128,11 +133,11 @@ class Bridge(Node):
         )
 
         # Testing services
-        self.test_pitch = self.create_service(
-            Empty,
-            'test_pitch',
-            self.adjust_pitch(30.0)
-        )
+        # self.test_pitch = self.create_service(
+        #     Empty,
+        #     'test_pitch',
+        #     self.adjust_pitch(30.0)
+        # )
         # Create Timers
         self.manual_timer = self.create_timer(
             1/rate,
@@ -146,8 +151,9 @@ class Bridge(Node):
 
     # Map Twist -> ManualControl
     # x, y, r in [-1000, 1000]
-    # z in [0, 1000] with neutral at z_neutral (typically 500)
+    # z in [0, 1000] with neutral at z_neutral(500)
     def scale_pm1000(self, value, max_value):
+        """Map Twist to ManualControl."""
         if max_value <= 1e-6:
             return 0
         return float(round(1000.0 * (value / max_value)))
@@ -162,11 +168,6 @@ class Bridge(Node):
         """Subscribe to twist messages from user."""
         self.last_cmd = msg
         self.last_cmd_time = self.get_clock().now()
-
-    def lights_callback(self, msg: Float32):
-        b = float(msg.data)
-        self.brightness = max(0.0, min(1.0, b))
-        self.servo_cmd = True
 
     def send_servo_command(self):
         if not self.servo_cmd:
@@ -183,8 +184,6 @@ class Bridge(Node):
                 pwm = 1100.0
         elif self.adjusting_pitch:
             pwm = self.float_to_pwm(lights=False)
-        else:
-            pwm = self.float_to_pwm(lights=True)
 
         # Optional: only send if changed
         # TODO Adjust this when lights are set up
@@ -193,6 +192,7 @@ class Bridge(Node):
             return
         if self.adjusting_grip:
             servo_out = int(self.get_parameter('gripper_servo').value)
+            self.get_logger().info(f'pwm is {pwm} and servo out is {servo_out}')
         elif self.adjusting_pitch:
             servo_out = int(self.get_parameter('mount_servo').value)
 
@@ -212,6 +212,7 @@ class Bridge(Node):
         self.last_sent_pwm = pwm
         self.servo_cmd = False
         self.adjusting_grip = False
+        self.adjusting_pitch = False
 
     def float_to_pwm(self, lights) -> float:
         pwm_min = int(self.get_parameter('servo_pwm_min').value)
@@ -222,11 +223,21 @@ class Bridge(Node):
             pwm = pwm_min + round(self.pitch_angle * (pwm_max - pwm_min))
         return max(pwm_min, min(pwm_max, pwm))
 
+    def lights_callback(self, request, response):
+        """Toggle the lights on the ROV."""
+        if self.brightness == 0.0:
+            self.brightness = 1.0
+        else:
+            self.brightness = 0.0
+        self.get_logger().info('Toggling lights')
+        return response
+
     def open_gripper(self, request, response):
         """Service callback to publish servo commands to open the gripper."""
         self.gripper_open = True
         self.adjusting_grip = True
         self.servo_cmd = True
+        self.get_logger().info('opening')
         return response
 
     def close_gripper(self, request, response):
@@ -243,7 +254,8 @@ class Bridge(Node):
         self.pitch_angle = angle
 
     def calibrate_bot(self, request, response):
-        """Simple calibration routine, consists of the following commands
+        """Make simple calibration routine, runs of the following commands.
+
         1. Decend for 1 second
         2. Move right for 1 second
         3. Move left for 1 second
@@ -324,10 +336,18 @@ class Bridge(Node):
         mc.z = self.clamp_float(float(self.z_neutral) + dz, 0.0, 1000.0)
 
         mc.buttons = int(0)   # must be int/uint16
+
+        # Publisher override commands to set light brightness
+        pwm = self.float_to_pwm(lights=True)
+        ovrd = OverrideRCIn()
+        ovrd.channels[10] = pwm
+        self.get_logger().info(f'pwm is {pwm}')
+        self.lights_pub.publish(ovrd)
         self.manual_pub.publish(mc)
 
 
 def main():
+    """Make the node run."""
     rclpy.init()
     node = Bridge()
     rclpy.spin(node)

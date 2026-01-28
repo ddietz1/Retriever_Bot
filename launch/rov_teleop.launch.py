@@ -6,22 +6,28 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     fcu_url = LaunchConfiguration('fcu_url')
+    gcs_url = LaunchConfiguration('gcs_url')
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'fcu_url',
-            default_value='udp://:14540@',
-            description='MAVLink FCU URL for MAVROS (e.g. udp://:14540@ or udp://@192.168.2.2:14550)'
+            default_value='udp://@14550',
+            description='MAVLink FCU URL for MAVROS (e.g. udp://@14550)'
+        ),
+        DeclareLaunchArgument(
+            'gcs_url',
+            default_value='udp://192.168.2.2:14551',
+            description='MAVLink GCS URL for MAVROS router forwarding (e.g. udp://192.168.2.2:14551)'
         ),
 
-        # Start MAVROS the same way your working manual command does.
+        # Start MAVROS (now forwarding to gcs_url as well)
         ExecuteProcess(
             cmd=[
                 'ros2', 'run', 'mavros', 'mavros_node',
                 '--ros-args',
                 '-p', ['fcu_url:=', fcu_url],
-                # If you want these too, uncomment:
-                # '-p', 'gcs_url:=',
+                '-p', ['gcs_url:=', gcs_url],
+                # Optional, if you want to be explicit:
                 # '-p', 'tgt_system:=1',
                 # '-p', 'tgt_component:=1',
             ],
