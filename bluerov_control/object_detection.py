@@ -18,7 +18,7 @@ QOS_IMAGE = QoSProfile(
 
 class GreenRingDetector(Node):
     def __init__(self):
-        super().__init__("green_ring_detector")
+        super().__init__("object_detection")
 
         self.bridge = CvBridge()
 

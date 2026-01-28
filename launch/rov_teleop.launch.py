@@ -34,4 +34,16 @@ def generate_launch_description():
             name='bridge_node',
             output='screen',
         ),
+        Node(
+            package='bluerov_control',
+            executable='object_detect',
+            name='object_detection',
+            output='screen',
+        ),
+        Node(
+            package='bluerov_control',
+            executable='camera_node',
+            name='camera_node',
+            output='screen',
+        ),
     ])

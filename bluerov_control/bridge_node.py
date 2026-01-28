@@ -35,8 +35,10 @@ class Bridge(Node):
 
         # Declare constants
         self.brightness = 0  # default off
+        self.pitch_angle = 0.0
         self.gripper_open = False  # default closed
-        self.adjusting_grip = False  # Needed for servo callback
+        self.adjusting_grip = False  # Needed for gripper servo callback
+        self.adjusting_pitch = False # Needed for pitch servo callback
         self.servo_cmd = False
 
         # Declare params
@@ -52,6 +54,8 @@ class Bridge(Node):
         self.declare_parameter('servo_pwm_max', 1900)
         self.declare_parameter('lights_servo', 12)
         self.declare_parameter('gripper_servo', 11)  # Servo 11 function set to Gripper via BlueOS
+        # Trying to pitch the camera mount
+        self.declare_parameter('mount_servo', 14)
 
         self.declare_parameter('z_neutral', 500)
 
@@ -116,10 +120,18 @@ class Bridge(Node):
             '/bluerov/close_gripper',
             self.close_gripper
         )
+
         self.calibrate = self.create_service(
             Empty,
             '/bluerov/calibrate',
             self.calibrate_bot
+        )
+
+        # Testing services
+        self.test_pitch = self.create_service(
+            Empty,
+            'test_pitch',
+            self.adjust_pitch(30.0)
         )
         # Create Timers
         self.manual_timer = self.create_timer(
@@ -169,8 +181,10 @@ class Bridge(Node):
                 pwm = 1900.0
             else:
                 pwm = 1100.0
+        elif self.adjusting_pitch:
+            pwm = self.float_to_pwm(lights=False)
         else:
-            pwm = self.float_to_pwm()
+            pwm = self.float_to_pwm(lights=True)
 
         # Optional: only send if changed
         # TODO Adjust this when lights are set up
@@ -179,8 +193,8 @@ class Bridge(Node):
             return
         if self.adjusting_grip:
             servo_out = int(self.get_parameter('gripper_servo').value)
-        else:
-            servo_out = int(self.get_parameter('lights_servo').value)
+        elif self.adjusting_pitch:
+            servo_out = int(self.get_parameter('mount_servo').value)
 
         req = CommandLong.Request()
         req.command = 183  # MAV_CMD_DO_SET_SERVO
@@ -199,12 +213,15 @@ class Bridge(Node):
         self.servo_cmd = False
         self.adjusting_grip = False
 
-    def float_to_pwm(self) -> float:
+    def float_to_pwm(self, lights) -> float:
         pwm_min = int(self.get_parameter('servo_pwm_min').value)
         pwm_max = int(self.get_parameter('servo_pwm_max').value)
-        pwm = pwm_min + round(self.brightness * (pwm_max - pwm_min))
+        if lights:
+            pwm = pwm_min + round(self.brightness * (pwm_max - pwm_min))
+        else:
+            pwm = pwm_min + round(self.pitch_angle * (pwm_max - pwm_min))
         return max(pwm_min, min(pwm_max, pwm))
-    
+
     def open_gripper(self, request, response):
         """Service callback to publish servo commands to open the gripper."""
         self.gripper_open = True
@@ -218,6 +235,12 @@ class Bridge(Node):
         self.adjusting_grip = True
         self.servo_cmd = True
         return response
+
+    def adjust_pitch(self, angle):
+        """Service callback to adjust the camera pitch."""
+        self.adjusting_pitch = True
+        self.servo_cmd = True
+        self.pitch_angle = angle
 
     def calibrate_bot(self, request, response):
         """Simple calibration routine, consists of the following commands

@@ -12,15 +12,18 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
+SDP_PATH = "/home/derek-dietz/Winter_Project/H264 USB Camera_ USB Camera.sdp"
 
-# BlueOS MJPG stream shown in your screenshot: udp://192.168.2.1:5602
-# We only need the port locally.
 PIPELINE = (
-    "udpsrc port=5602 buffer-size=5242880 ! "
-    "jpegdec ! videoconvert ! videoscale ! "
-    "video/x-raw,format=BGR,width=640,height=360 ! "
-    "appsink name=sink emit-signals=true drop=true max-buffers=1 sync=false"
+  'udpsrc port=5602 '
+  'caps="application/x-rtp,media=video,encoding-name=JPEG,payload=96,clock-rate=90000" ! '
+  'rtpjpegdepay ! jpegdec ! videoconvert ! videoscale ! '
+  'video/x-raw,format=BGR,width=640,height=360 ! '
+  'appsink name=sink emit-signals=true drop=true max-buffers=2 sync=false'
 )
+
+
+
 
 QOS_IMAGE = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -32,6 +35,8 @@ QOS_IMAGE = QoSProfile(
 class MJPEGCameraNode(Node):
     def __init__(self):
         super().__init__("camera_node")
+
+        self.frame_count = 0
 
         self.pub = self.create_publisher(Image, "/bluerov/camera/image_raw", QOS_IMAGE)
         self.bridge = CvBridge()
@@ -47,6 +52,7 @@ class MJPEGCameraNode(Node):
         Gst.init(None)
         self.pipeline = Gst.parse_launch(PIPELINE)
         self.appsink = self.pipeline.get_by_name("sink")
+        self.appsink.set_property("emit-signals", True)
         if self.appsink is None:
             raise RuntimeError("appsink not found (expected: appsink name=sink ...)")
 
@@ -56,7 +62,7 @@ class MJPEGCameraNode(Node):
         self.get_logger().info(f"GStreamer set_state PLAYING -> {ret.value_nick}")
 
         # Publish at up to 30Hz (only publishes when a new frame arrives)
-        self.timer = self.create_timer(1.0 / 30.0, self.publish_latest)
+        self.timer = self.create_timer(1.0 / 60.0, self.publish_latest)
 
     def on_sample(self, sink):
         sample = sink.emit("pull-sample")
@@ -89,6 +95,10 @@ class MJPEGCameraNode(Node):
     def publish_latest(self):
         # Gentle watchdog: restart only if truly wedged
         now = time.monotonic()
+        self.frame_count += 1
+        if self.frame_count % 30 == 0:
+            self.get_logger().info("Received 30 frames")
+            self.frame_count = 0
         if now - self.last_sample_time > 3.0 and now > self.restart_cooldown_until:
             self.get_logger().warn(
                 f"No MJPEG samples for {now - self.last_sample_time:.2f}s, restarting pipeline"
@@ -111,6 +121,7 @@ class MJPEGCameraNode(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "bluerov_camera"
         self.pub.publish(msg)
+        self.get_logger().info(f"Publish took {(time.monotonic() - now)*1000:.2f}ms")
 
 
 def main():
