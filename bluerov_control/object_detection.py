@@ -61,6 +61,7 @@ class GreenRingDetector(Node):
 
         debug = frame.copy()
 
+
         if len(contours) == 0:
             # No detection: publish zeros and debug view
             self.pub_ex.publish(Float32(data=0.0))
