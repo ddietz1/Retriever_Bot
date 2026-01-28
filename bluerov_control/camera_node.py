@@ -3,9 +3,10 @@ import time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage
 from cv_bridge import CvBridge
 import numpy as np
+import cv2
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -15,7 +16,7 @@ PIPELINE = (
     'udpsrc port=5602 '
     'caps="application/x-rtp,media=video,encoding-name=JPEG,payload=96,clock-rate=90000" ! '
     'rtpjpegdepay ! jpegdec ! videoconvert ! videoscale ! '
-    'video/x-raw,format=BGR,width=320,height=180 ! '  # Half resolution
+    'video/x-raw,format=BGR,width=640,height=360 ! '
     'appsink name=sink emit-signals=true drop=true max-buffers=2 sync=false'
 )
 
@@ -30,7 +31,11 @@ class MJPEGCameraNode(Node):
     def __init__(self):
         super().__init__("camera_node")
 
-        self.pub = self.create_publisher(Image, "/bluerov/camera/image_raw", QOS_IMAGE)
+        self.pub = self.create_publisher(
+            CompressedImage, 
+            "/bluerov/camera/image_raw/compressed", 
+            QOS_IMAGE
+        )
         self.bridge = CvBridge()
 
         self.last_sample_time = time.monotonic()
@@ -39,6 +44,10 @@ class MJPEGCameraNode(Node):
         # Diagnostic counters
         self.frame_count = 0
         self.publish_count = 0
+        
+        # JPEG compression quality (0-100, higher = better quality but larger size)
+        # 80 is a good balance, adjust if needed
+        self.jpeg_quality = 80
 
         Gst.init(None)
         self.pipeline = Gst.parse_launch(PIPELINE)
@@ -52,6 +61,7 @@ class MJPEGCameraNode(Node):
 
         ret = self.pipeline.set_state(Gst.State.PLAYING)
         self.get_logger().info(f"GStreamer set_state PLAYING -> {ret.value_nick}")
+        # self.get_logger().info(f"Publishing compressed images with quality={self.jpeg_quality}")
 
         # Watchdog timer to restart pipeline if it wedges
         self.timer = self.create_timer(1.0, self.check_pipeline_health)
@@ -78,17 +88,23 @@ class MJPEGCameraNode(Node):
             # Update timestamp for watchdog
             self.last_sample_time = time.monotonic()
             
-            # Publish immediately
-            msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            # Compress to JPEG
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
+            
+            # Create compressed message
+            msg = CompressedImage()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = "bluerov_camera"
+            msg.format = "jpeg"
+            msg.data = buffer.tobytes()
+            
             self.pub.publish(msg)
             
             # Diagnostics
-            self.frame_count += 1
-            self.publish_count += 1
-            if self.frame_count % 30 == 0:
-                self.get_logger().info(f"Received and published 30 frames")
+            # self.frame_count += 1
+            # self.publish_count += 1
+            # if self.frame_count % 30 == 0:
+            #     self.get_logger().info(f"Received and published 30 compressed frames")
                 
         finally:
             buf.unmap(mapinfo)

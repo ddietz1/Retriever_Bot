@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Float32
 from cv_bridge import CvBridge
 
@@ -22,27 +22,45 @@ class GreenRingDetector(Node):
 
         self.bridge = CvBridge()
 
+        # Subscribe to compressed images instead of raw
         self.sub = self.create_subscription(
-            Image, "/bluerov/camera/image_raw", self.on_image, QOS_IMAGE
+            CompressedImage, 
+            "/bluerov/camera/image_raw/compressed", 
+            self.on_image, 
+            QOS_IMAGE
         )
 
-        self.pub_debug = self.create_publisher(Image, "/bluerov/ring/debug_image", QOS_IMAGE)
+        self.pub_debug = self.create_publisher(CompressedImage, "/bluerov/ring/debug_image/compressed", QOS_IMAGE)
         self.pub_ex = self.create_publisher(Float32, "/bluerov/ring/error_x", 10)
         self.pub_ey = self.create_publisher(Float32, "/bluerov/ring/error_y", 10)
         self.pub_area = self.create_publisher(Float32, "/bluerov/ring/area_norm", 10)
 
         # Tunable HSV thresholds for a green pool ring
-        # Start here; you’ll likely adjust after seeing the debug overlay.
-        self.h_low = 35
-        self.h_high = 85
-        self.s_low = 60
-        self.v_low = 40
+        self.h_low = 30
+        self.h_high = 90
+        self.s_low = 40
+        self.v_low = 30
 
         # Optional: ignore tiny detections
         self.min_area_px = 500
+        
+        # Diagnostic counter
+        self.frame_count = 0
 
-    def on_image(self, msg: Image):
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+    def on_image(self, msg: CompressedImage):
+        # Decode compressed JPEG image
+        np_arr = np.frombuffer(msg.data, np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            self.get_logger().warn("Failed to decode compressed image")
+            return
+        
+        # Diagnostics
+        self.frame_count += 1
+        if self.frame_count % 30 == 0:
+            self.get_logger().info(f"Detection received 30 frames")
+        
         h, w = frame.shape[:2]
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -61,15 +79,17 @@ class GreenRingDetector(Node):
 
         debug = frame.copy()
 
-
         if len(contours) == 0:
             # No detection: publish zeros and debug view
             self.pub_ex.publish(Float32(data=0.0))
             self.pub_ey.publish(Float32(data=0.0))
             self.pub_area.publish(Float32(data=0.0))
 
-            dbg_msg = self.bridge.cv2_to_imgmsg(debug, encoding="bgr8")
+            _, debug_buffer = cv2.imencode('.jpg', debug, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            dbg_msg = CompressedImage()
             dbg_msg.header = msg.header
+            dbg_msg.format = "jpeg"
+            dbg_msg.data = debug_buffer.tobytes()
             self.pub_debug.publish(dbg_msg)
             return
 
@@ -82,8 +102,11 @@ class GreenRingDetector(Node):
             self.pub_ey.publish(Float32(data=0.0))
             self.pub_area.publish(Float32(data=0.0))
 
-            dbg_msg = self.bridge.cv2_to_imgmsg(debug, encoding="bgr8")
+            _, debug_buffer = cv2.imencode('.jpg', debug, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            dbg_msg = CompressedImage()
             dbg_msg.header = msg.header
+            dbg_msg.format = "jpeg"
+            dbg_msg.data = debug_buffer.tobytes()
             self.pub_debug.publish(dbg_msg)
             return
 
@@ -119,8 +142,11 @@ class GreenRingDetector(Node):
         self.pub_ey.publish(Float32(data=float(ey)))
         self.pub_area.publish(Float32(data=float(area_norm)))
 
-        dbg_msg = self.bridge.cv2_to_imgmsg(debug, encoding="bgr8")
+        _, debug_buffer = cv2.imencode('.jpg', debug, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        dbg_msg = CompressedImage()
         dbg_msg.header = msg.header
+        dbg_msg.format = "jpeg"
+        dbg_msg.data = debug_buffer.tobytes()
         self.pub_debug.publish(dbg_msg)
 
 
