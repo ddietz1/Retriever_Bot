@@ -30,7 +30,8 @@ setup(
         'console_scripts': [
             'bridge_node = bluerov_control.bridge_node:main',
             'camera_node = bluerov_control.camera_node:main',
-            'object_detect = bluerov_control.object_detection:main'
+            'object_detect = bluerov_control.object_detection:main',
+            'control_node = bluerov_control.control:main',
         ],
     },
 )

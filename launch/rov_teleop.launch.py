@@ -52,4 +52,10 @@ def generate_launch_description():
             name='camera_node',
             output='screen',
         ),
+        # Node(
+        #     package='bluerov_control',
+        #     executable='control_node',
+        #     name='control_node',
+        #     output='screen',
+        # ),
     ])

@@ -9,21 +9,12 @@ from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy
 
 from geometry_msgs.msg import Twist, TwistStamped
-from mavros_msgs.msg import ManualControl, OverrideRCIn
+from mavros_msgs.msg import ManualControl, MountControl, OverrideRCIn
 from mavros_msgs.srv import CommandLong
 
 from std_msgs.msg import Float32
 from std_srvs.srv import Empty
-
-
-class State(Enum):
-    """Current state of the system.
-
-    Used for determining if zero vel commands should be published
-    """
-
-    STOPPED = auto()
-    MOVING = auto()
+from bluerov_interfaces.srv import Pitch
 
 
 class Bridge(Node):
@@ -40,6 +31,7 @@ class Bridge(Node):
         self.adjusting_grip = False  # Needed for gripper servo callback
         self.adjusting_pitch = False  # Needed for pitch servo callback
         self.servo_cmd = False
+        self.driving = False
 
         # Declare params
         self.declare_parameter('publish_rate_hz', 20.0)
@@ -91,6 +83,12 @@ class Bridge(Node):
             markerQoS
         )
 
+        self.pitch_pub = self.create_publisher(
+            MountControl,
+            '/mavros/mount_control/command',
+            markerQoS
+        )
+
         self.lights_pub = self.create_publisher(
             OverrideRCIn,
             '/mavros/rc/override',
@@ -124,6 +122,12 @@ class Bridge(Node):
             Empty,
             '/bluerov/set_lights',
             self.lights_callback
+        )
+
+        self.change_pitch = self.create_service(
+            Pitch,
+            '/bluerov/adjust_pitch',
+            self.adjust_pitch
         )
 
         self.calibrate = self.create_service(
@@ -182,8 +186,6 @@ class Bridge(Node):
                 pwm = 1900.0
             else:
                 pwm = 1100.0
-        elif self.adjusting_pitch:
-            pwm = self.float_to_pwm(lights=False)
 
         # Optional: only send if changed
         # TODO Adjust this when lights are set up
@@ -193,8 +195,6 @@ class Bridge(Node):
         if self.adjusting_grip:
             servo_out = int(self.get_parameter('gripper_servo').value)
             self.get_logger().info(f'pwm is {pwm} and servo out is {servo_out}')
-        elif self.adjusting_pitch:
-            servo_out = int(self.get_parameter('mount_servo').value)
 
         req = CommandLong.Request()
         req.command = 183  # MAV_CMD_DO_SET_SERVO
@@ -212,7 +212,6 @@ class Bridge(Node):
         self.last_sent_pwm = pwm
         self.servo_cmd = False
         self.adjusting_grip = False
-        self.adjusting_pitch = False
 
     def float_to_pwm(self, lights) -> float:
         pwm_min = int(self.get_parameter('servo_pwm_min').value)
@@ -247,11 +246,15 @@ class Bridge(Node):
         self.servo_cmd = True
         return response
 
-    def adjust_pitch(self, angle):
+    def adjust_pitch(self, request, response):
         """Service callback to adjust the camera pitch."""
-        self.adjusting_pitch = True
-        self.servo_cmd = True
-        self.pitch_angle = angle
+        cmd = MountControl()
+        cmd.mode = 2
+        cmd.pitch = request.angle
+        cmd.yaw = 0.0
+        cmd.roll = 0.0
+        self.pitch_pub.publish(cmd)
+        return response
 
     def calibrate_bot(self, request, response):
         """Make simple calibration routine, runs of the following commands.
@@ -326,9 +329,15 @@ class Bridge(Node):
         cmd.angular.z = self.limit_vel(cmd.angular.z, self.max_yaw)
 
         mc = ManualControl()
-        mc.x = self.clamp_float(self.scale_pm1000(cmd.linear.x, self.max_surge), -1000, 1000)
-        mc.y = self.clamp_float(self.scale_pm1000(cmd.linear.y, self.max_sway),  -1000, 1000)
-        mc.r = self.clamp_float(self.scale_pm1000(cmd.angular.z, self.max_yaw),  -1000, 1000)
+        mc.x = self.clamp_float(
+            self.scale_pm1000(cmd.linear.x, self.max_surge), -1000, 1000
+        )
+        mc.y = self.clamp_float(
+            self.scale_pm1000(cmd.linear.y, self.max_sway),  -1000, 1000
+        )
+        mc.r = self.clamp_float(
+            self.scale_pm1000(cmd.angular.z, self.max_yaw),  -1000, 1000
+        )
         # self.get_logger().info(f'mc is {mc}')
 
         # heave maps to +/-500 around neutral
@@ -340,8 +349,8 @@ class Bridge(Node):
         # Publisher override commands to set light brightness
         pwm = self.float_to_pwm(lights=True)
         ovrd = OverrideRCIn()
-        ovrd.channels[10] = pwm
-        self.get_logger().info(f'pwm is {pwm}')
+        ovrd.channels[9] = int(pwm)
+        # self.get_logger().info(f'pwm is {pwm}')
         self.lights_pub.publish(ovrd)
         self.manual_pub.publish(mc)
 
