@@ -58,8 +58,8 @@ class Controller(Node):
 
         # Control constants (tune)
         self.eps = 0.05
-        self.P_yaw = 0.25
-        self.P_heave = 0.15
+        self.P_yaw = 0.20
+        self.P_heave = -0.12
         self.P_forward = 0.2
         self.P_strafe = 0.2
         self.target_size = 0.32
@@ -232,7 +232,7 @@ class Controller(Node):
             self.pitch_set_search = True
 
         if not self.lights_on:
-            # self.call_lights_service()
+            self.call_lights_service()
             self.lights_on = True
 
         self.call_grip_client(open_=True)

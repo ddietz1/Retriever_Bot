@@ -120,9 +120,10 @@ class GreenRingDetector(Node):
 
             if area >= self.min_area_px:
                 perimeter = cv2.arcLength(c, True)
+
                 if perimeter > 0.0:
                     circularity = 4.0 * np.pi * area / (perimeter * perimeter)
-                    if circularity >= 0.15:
+                    if circularity >= 0.05:
                         valid = True
 
                         x, y, bw, bh = cv2.boundingRect(c)
