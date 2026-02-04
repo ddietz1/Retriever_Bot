@@ -72,7 +72,7 @@ class GreenRingDetector(Node):
         self.v_low = 75
 
         # Optional: ignore tiny detections
-        self.min_area_px = 500
+        self.min_area_px = 200
 
         # Ignore large detections as well
         self.max_area_px = 1500
@@ -81,27 +81,21 @@ class GreenRingDetector(Node):
         # Number of detected contours in a row
         self.detected_contours = 0
 
-    def on_image(self, msg: CompressedImage):
-        # Decode compressed JPEG image
+    def on_image(self, msg: CompressedImage) -> None:
+        # Decode compressed JPEG image -> BGR frame
         np_arr = np.frombuffer(msg.data, np.uint8)
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
         if frame is None:
-            self.get_logger().warn('Failed to decode compressed image')
+            self.get_logger().warn("Failed to decode compressed image")
             return
 
-        # Diagnostics
-        # self.frame_count += 1
-        # if self.frame_count % 30 == 0:
-        #     self.get_logger().info(f"Detection received 30 frames")
-
         h, w = frame.shape[:2]
+        debug = frame.copy()
 
+        # --- Threshold in HSV ---
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
         lower = np.array([self.h_low, self.s_low, self.v_low], dtype=np.uint8)
         upper = np.array([self.h_high, 255, 255], dtype=np.uint8)
-
         mask = cv2.inRange(hsv, lower, upper)
 
         # Clean up the mask
@@ -109,116 +103,81 @@ class GreenRingDetector(Node):
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        contours, _ = cv2.findContours(
-            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        debug = frame.copy()
+        # Defaults (no valid detection)
+        valid = False
+        c = None
+        x = y = bw = bh = 0
+        ex = ey = 0.0
+        area_norm = 0.0
+        circularity = 0.0
 
-        if len(contours) == 0:
-            # No detection: publish zeros and debug view
-            self.pub_ex.publish(Float32(data=0.0))
-            self.pub_ey.publish(Float32(data=0.0))
-            self.pub_area.publish(Float32(data=0.0))
+        # --- Select / validate candidate contour ---
+        if contours:
+            c = max(contours, key=cv2.contourArea)
+            area = float(cv2.contourArea(c))
 
-            _, debug_buffer = cv2.imencode(
-                '.jpg', debug, [cv2.IMWRITE_JPEG_QUALITY, 80]
-            )
+            if area >= self.min_area_px:
+                perimeter = cv2.arcLength(c, True)
+                if perimeter > 0.0:
+                    circularity = 4.0 * np.pi * area / (perimeter * perimeter)
+                    if circularity >= 0.15:
+                        valid = True
+
+                        x, y, bw, bh = cv2.boundingRect(c)
+                        cx = x + bw / 2.0
+                        cy = y + bh / 2.0
+
+                        # Normalize errors to [-1, 1]
+                        ex = (cx - (w / 2.0)) / (w / 2.0)
+                        ey = (cy - (h / 2.0)) / (h / 2.0)
+
+                        # Normalize area to [0, 1]
+                        area_norm = min(1.0, area / float(w * h))
+
+                        # Draw overlay
+                        cv2.rectangle(debug, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
+                        cv2.circle(debug, (int(cx), int(cy)), 5, (0, 255, 0), -1)
+                        cv2.line(debug, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
+                        cv2.line(debug, (0, h // 2), (w, h // 2), (255, 255, 255), 1)
+                        cv2.putText(
+                            debug,
+                            f"ex={ex:+.2f} ey={ey:+.2f} area={area_norm:.3f}",
+                            (10, 25),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            (255, 255, 255),
+                            2,
+                        )
+
+        # --- Publish outputs ---
+        if valid:
+            self.detected_contours += 1
+        else:
+            self.detected_contours = 0
+            ex = ey = area_norm = 0.0  # force zeros on invalid
+
+        self.pub_ex.publish(Float32(data=float(ex)))
+        self.pub_ey.publish(Float32(data=float(ey)))
+        self.pub_area.publish(Float32(data=float(area_norm)))
+
+        object_msg = Object()
+        object_msg.detected = (self.detected_contours >= 50)
+        object_msg.cx = float(ex)
+        object_msg.cy = float(ey)
+        object_msg.area = float(area_norm)
+        object_msg.circularity = float(circularity)
+        self.object_pub.publish(object_msg)
+
+        # ALWAYS publish debug (prevents "freezing" when you early-reject detections)
+        ok, debug_buffer = cv2.imencode(".jpg", debug, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ok:
             dbg_msg = CompressedImage()
             dbg_msg.header = msg.header
             dbg_msg.format = "jpeg"
             dbg_msg.data = debug_buffer.tobytes()
             self.pub_debug.publish(dbg_msg)
-            self.detected_contours = 0  # Reset counter
-
-            return
-
-        # Largest blob
-        c = max(contours, key=cv2.contourArea)
-        area = float(cv2.contourArea(c))
-
-        if (area < self.min_area_px):
-            self.pub_ex.publish(Float32(data=0.0))
-            self.pub_ey.publish(Float32(data=0.0))
-            self.pub_area.publish(Float32(data=0.0))
-
-            _, debug_buffer = cv2.imencode(
-                '.jpg', debug, [cv2.IMWRITE_JPEG_QUALITY, 80]
-            )
-            dbg_msg = CompressedImage()
-            dbg_msg.header = msg.header
-            dbg_msg.format = 'jpeg'
-            dbg_msg.data = debug_buffer.tobytes()
-            self.pub_debug.publish(dbg_msg)
-            self.detected_contours = 0  # Reset counter
-            return
-        # Check circularity (rings are circular)
-        perimeter = cv2.arcLength(c, True)
-        if perimeter == 0:
-            self.detected_contours = 0
-            return
-        circularity = 4 * np.pi * area / (perimeter * perimeter)
-
-        # Ring should be reasonably circular (0.7-1.0)
-        if circularity < 0.25:
-            #self.get_logger().info(f"Rejected: circularity={circularity:.2f}")
-            self.detected_contours = 0
-            return
-
-        x, y, bw, bh = cv2.boundingRect(c)
-        cx = x + bw / 2.0  # Center of rect
-        cy = y + bh / 2.0
-
-        # Normalize errors to [-1, 1]
-        ex = (cx - (w / 2.0)) / (w / 2.0)
-        ey = (cy - (h / 2.0)) / (h / 2.0)
-
-        # Normalize area to [0, 1] relative to image
-        area_norm = min(1.0, area / float(w * h))
-
-        # Draw overlay
-        cv2.rectangle(debug, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
-        cv2.circle(debug, (int(cx), int(cy)), 5, (0, 255, 0), -1)
-        cv2.line(debug, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
-        cv2.line(debug, (0, h // 2), (w, h // 2), (255, 255, 255), 1)
-
-        cv2.putText(
-            debug,
-            f'ex={ex:+.2f} ey={ey:+.2f} area={area_norm:.3f}',
-            (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),
-            2,
-        )
-
-        object_msg = Object()
-
-        # Publish 'detected' if contours are detected for > 50 frames
-        if self.detected_contours > 50:
-            object_msg.detected = True
-        else:
-            object_msg.detected = False
-
-        object_msg.cx = ex
-        object_msg.cy = ey
-        object_msg.area = area_norm
-
-        self.pub_ex.publish(Float32(data=float(ex)))
-        self.pub_ey.publish(Float32(data=float(ey)))
-        self.pub_area.publish(Float32(data=float(area_norm)))
-        self.object_pub.publish(object_msg)
-
-        _, debug_buffer = cv2.imencode(
-            '.jpg', debug, [cv2.IMWRITE_JPEG_QUALITY, 80]
-        )
-        dbg_msg = CompressedImage()
-        dbg_msg.header = msg.header
-        dbg_msg.format = 'jpeg'
-        dbg_msg.data = debug_buffer.tobytes()
-        self.pub_debug.publish(dbg_msg)
-
-        self.detected_contours += 1
 
 
 def main():
