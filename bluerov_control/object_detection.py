@@ -116,8 +116,9 @@ class GreenRingDetector(Node):
         # --- Select / validate candidate contour ---
         if contours:
             c = max(contours, key=cv2.contourArea)
-            area = float(cv2.contourArea(c))
-
+            # area = float(cv2.contourArea(c))
+            hull = cv2.convexHull(c)
+            area = float(cv2.contourArea(hull))
             if area >= self.min_area_px:
                 perimeter = cv2.arcLength(c, True)
 
@@ -154,6 +155,9 @@ class GreenRingDetector(Node):
 
         # --- Publish outputs ---
         if valid:
+            # (xc, yc), r = cv2.minEnclosingCircle(c)
+            # size = float(r)  # use r as close metric
+
             self.detected_contours += 1
         else:
             self.detected_contours = 0
@@ -164,7 +168,7 @@ class GreenRingDetector(Node):
         self.pub_area.publish(Float32(data=float(area_norm)))
 
         object_msg = Object()
-        object_msg.detected = (self.detected_contours >= 50)
+        object_msg.detected = (self.detected_contours >= 25)
         object_msg.cx = float(ex)
         object_msg.cy = float(ey)
         object_msg.area = float(area_norm)

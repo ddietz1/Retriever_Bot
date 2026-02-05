@@ -58,15 +58,16 @@ class Controller(Node):
 
         # Control constants (tune)
         self.eps = 0.05
-        self.P_yaw = 0.20
+        self.P_yaw = 0.16
         self.P_heave = -0.12
         self.P_forward = 0.2
-        self.P_strafe = 0.2
-        self.target_size = 0.32
+        self.P_strafe = 0.16
+        self.target_size = 0.3
+        self.gripper_offset_x = 0.2  # Tested experimentally
 
         # Depth hold (tune)
-        self.Kp_depth = 0.1
-        self.vz_max = 0.5
+        self.Kp_depth = 0.12
+        self.vz_max = 0.1
         self.y_on = 0.05
         self.y_off = 0.10
         self.depth_lock_frames = 10
@@ -75,6 +76,7 @@ class Controller(Node):
         self.grabbing_timer = 0
         self.checking_timer = 0
         self.detected_timer = 0
+        self.detected_ring_timer = 0
         self.depth_lock_counter = 0
         self.within_reach_counter = 0
 
@@ -86,7 +88,7 @@ class Controller(Node):
         self.depth_hold_enabled = False
 
         # Logging throttle
-        self.log_every_n = 20
+        self.log_every_n = 40
         self.log_count = 0
 
         # Depth state
@@ -162,6 +164,11 @@ class Controller(Node):
         err = self.depth_setpoint - self.depth
         vz = self.Kp_depth * err
         return max(-self.vz_max, min(self.vz_max, vz))
+    
+    def _apply_x_offset(self, x) -> float:
+        """Once the ring is close, adjust x offset to ensure alignment."""
+        diff_x = x - self.gripper_offset_x
+        return diff_x
 
     def get_alt(self, msg: Float64):
         """Track current depth (rel_alt)."""
@@ -228,11 +235,11 @@ class Controller(Node):
         self._enter_state(State.SEARCHING)
 
         if not self.pitch_set_search:
-            self.call_pitch_service(-35.0)
+            self.call_pitch_service(-30.0)
             self.pitch_set_search = True
 
         if not self.lights_on:
-            self.call_lights_service()
+            # self.call_lights_service()
             self.lights_on = True
 
         self.call_grip_client(open_=True)
@@ -256,7 +263,7 @@ class Controller(Node):
             self._enter_state(State.RING_DETECTED)
             self.detected_timer = 0
         elif (not detected) and (self.State == State.RING_DETECTED):
-            if self.detected_timer < 51:
+            if self.detected_timer < 101:
                 self.detected_timer += 1
             else:
                 self._enter_state(State.SEARCHING)
@@ -304,8 +311,12 @@ class Controller(Node):
                 tw.angular.z = self.P_yaw * diff_x
                 tw.linear.x = self.P_forward * diff_area
 
-            elif 0.15 < area < self.target_size:  # close
+            elif 0.15 < area < 0.3:  # close
                 tw.linear.y = self.P_strafe * diff_x
+                tw.linear.x = self.P_forward * diff_area
+
+            elif 0.3 < area < self.target_size:  # Now adjust x to make ring align with gripper
+                tw.linear.y = self.P_strafe * self._apply_x_offset(diff_x)
                 tw.linear.x = self.P_forward * diff_area
                 if circle_percent < 0.65:
                     tw.angular.z = 0.2 * (0.6 - circle_percent)
@@ -322,7 +333,7 @@ class Controller(Node):
         # --- GRABBING ---
         elif self.State == State.GRABBING:
             if self.grabbing_timer < 15:
-                tw.linear.x = 0.1
+                tw.linear.x = 0.05
                 self.grabbing_timer += 1
             else:
                 self.call_grip_client(open_=False)
@@ -331,18 +342,33 @@ class Controller(Node):
         # --- RETRIEVED ---
         elif self.State == State.RETRIEVED:
             if self.checking_timer < 15:
-                tw.linear.x = -0.1
+                tw.linear.x = -0.05
                 self.checking_timer += 1
             else:
                 if not self.pitch_set_check:
                     self.call_pitch_service(-85.0)
                     self.pitch_set_check = True
                 if detected:
-                    self._enter_state(State.HOMING)
+                    # Start detected timer
+                    if self.detected_ring_timer > 60:
+                        self._enter_state(State.HOMING)  # Done
+                    else:
+                        self.detected_ring_timer += 1
+                else:
+                    # Reduce timer
+                    if self.detected_ring_timer == 0:
+                        # Reenter search mode
+                        self.get_logger().info('Ring no longer detected, reentering search mode')
+                        self._enter_state(State.SEARCHING)
+                        self.call_pitch_service(-30.0)
+                        self.pitch_set_check = False
+                        self.call_grip_client(open_=True)
+                    else:
+                        self.detected_ring_timer -= 1
 
         # --- HOMING ---
         elif self.State == State.HOMING:
-            tw.linear.z = -0.1  # Slowly ascend
+            tw.linear.z = -0.03  # Slowly ascend
 
         # ---- Throttled logging (never gates behavior) ----
         self.log_count += 1
