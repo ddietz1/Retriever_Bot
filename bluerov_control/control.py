@@ -5,9 +5,14 @@ Subscribe to /bluerov/ring/object,
 Determine ROV velocity based on position from ring
 Publish Twist messages to /bluerov/cmd_vel
 When close enough, call gripper close service
+
+NOTE:
+- In this version, msg.area is treated as a *stable size metric* in [0, 1]
+  (e.g., filtered enclosing-circle radius from your detector), not raw contour area.
 """
 
 from enum import Enum, auto
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
@@ -62,8 +67,19 @@ class Controller(Node):
         self.P_heave = -0.12
         self.P_forward = 0.2
         self.P_strafe = 0.16
-        self.target_size = 0.3
+
+        # --- UPDATED: "size" thresholds (msg.area) ---
+        # Treat msg.area as "size_norm" in [0,1] (stable close metric)
+        self.target_size = 0.95   # close enough to grab (tune in water)
+        self.far_size = 0.45      # far/close transition (tune)
+        self.close_size = 0.65    # close/near transition (tune)
+
+        # Gripper alignment / grab gating
         self.gripper_offset_x = 0.2  # Tested experimentally
+        self.grab_ex_tol = 0.45
+        self.grab_ey_tol = 0.45
+        self.grab_frames_required = 10
+        self.within_reach_counter = 0
 
         # Depth hold (tune)
         self.Kp_depth = 0.12
@@ -78,7 +94,6 @@ class Controller(Node):
         self.detected_timer = 0
         self.detected_ring_timer = 0
         self.depth_lock_counter = 0
-        self.within_reach_counter = 0
 
         # Flags
         self.gripper_closed = False
@@ -108,7 +123,7 @@ class Controller(Node):
 
         self.depth_sub = self.create_subscription(
             Float64,
-            '/mavros/global_position/rel_alt',  # FIXED typo
+            '/mavros/global_position/rel_alt',
             self.get_alt,
             QOS_DEPTH,
         )
@@ -164,11 +179,10 @@ class Controller(Node):
         err = self.depth_setpoint - self.depth
         vz = self.Kp_depth * err
         return max(-self.vz_max, min(self.vz_max, vz))
-    
-    def _apply_x_offset(self, x) -> float:
+
+    def _apply_x_offset(self, x: float) -> float:
         """Once the ring is close, adjust x offset to ensure alignment."""
-        diff_x = x - self.gripper_offset_x
-        return diff_x
+        return x - self.gripper_offset_x
 
     def get_alt(self, msg: Float64):
         """Track current depth (rel_alt)."""
@@ -235,7 +249,7 @@ class Controller(Node):
         self._enter_state(State.SEARCHING)
 
         if not self.pitch_set_search:
-            self.call_pitch_service(-30.0)
+            self.call_pitch_service(-40.0)
             self.pitch_set_search = True
 
         if not self.lights_on:
@@ -243,14 +257,16 @@ class Controller(Node):
             self.lights_on = True
 
         self.call_grip_client(open_=True)
-
         return response
 
     def controller(self, msg: Object):
         """Control the ROV based on object detection."""
         center_x = float(msg.cx)          # +right in camera frame
         center_y = float(msg.cy)          # +down in camera frame
-        area = float(msg.area)
+
+        # IMPORTANT: size is a filtered close-range size metric in [0,1]
+        size = float(msg.area)
+
         detected = bool(msg.detected)
         circle_percent = float(msg.circularity)
 
@@ -262,11 +278,13 @@ class Controller(Node):
         if detected and (self.State == State.SEARCHING):
             self._enter_state(State.RING_DETECTED)
             self.detected_timer = 0
+            self.within_reach_counter = 0
         elif (not detected) and (self.State == State.RING_DETECTED):
             if self.detected_timer < 101:
                 self.detected_timer += 1
             else:
                 self._enter_state(State.SEARCHING)
+                self.within_reach_counter = 0
         else:
             self.detected_timer = 0
 
@@ -278,8 +296,6 @@ class Controller(Node):
 
         # --- RING_DETECTED ---
         elif self.State == State.RING_DETECTED:
-            diff_area = max(0.0, self.target_size - area)
-
             # ---- Depth-hold latch logic (ONLY in RING_DETECTED) ----
             if detected and (self.depth is not None):
                 # Enter depth hold after |diff_y| is 'good' for N frames
@@ -306,29 +322,39 @@ class Controller(Node):
             else:
                 tw.linear.z = self.P_heave * diff_y
 
-            # ---- Approach logic ----
-            if 0.0 < area < 0.15:  # far
+            # Approach error: want size to increase to target_size
+            diff_size = max(0.0, self.target_size - size)
+
+            # --- Approach logic based on stable size metric ---
+            if 0.0 < size < self.far_size:  # far
                 tw.angular.z = self.P_yaw * diff_x
-                tw.linear.x = self.P_forward * diff_area
+                tw.linear.x = self.P_forward * diff_size
 
-            elif 0.15 < area < 0.3:  # close
+            elif self.far_size <= size < self.close_size:  # close
                 tw.linear.y = self.P_strafe * diff_x
-                tw.linear.x = self.P_forward * diff_area
+                tw.linear.x = self.P_forward * diff_size
 
-            elif 0.3 < area < self.target_size:  # Now adjust x to make ring align with gripper
+            elif self.close_size <= size < self.target_size:  # near: align to gripper offset
                 tw.linear.y = self.P_strafe * self._apply_x_offset(diff_x)
-                tw.linear.x = self.P_forward * diff_area
-                if circle_percent < 0.65:
-                    tw.angular.z = 0.2 * (0.6 - circle_percent)
+                tw.linear.x = self.P_forward * diff_size
                 self.within_reach_counter = 0
 
-            elif area > self.target_size:  # reached
-                # Make it count for 10 frames
-                if self.within_reach_counter < 10:
-                    self.within_reach_counter += 1
+            else:  # size >= target_size => candidate grab zone
+                centered = (abs(diff_x - 0.2) < self.grab_ex_tol) and (abs(diff_y) < self.grab_ey_tol)
+
+                if centered:
+                    # Debounce grab condition for N frames
+                    if self.within_reach_counter < self.grab_frames_required:
+                        self.within_reach_counter += 1
+                    else:
+                        self._enter_state(State.GRABBING)
+                        self.within_reach_counter = 0
                 else:
-                    self._enter_state(State.GRABBING)
+                    # Not centered: keep trying to center, but do NOT keep pushing forward
                     self.within_reach_counter = 0
+                    tw.linear.y = self.P_strafe * self._apply_x_offset(diff_x)
+                    tw.linear.x = 0.0
+                    tw.angular.z = self.P_yaw * diff_x
 
         # --- GRABBING ---
         elif self.State == State.GRABBING:
@@ -374,18 +400,16 @@ class Controller(Node):
         self.log_count += 1
         if self.log_count % self.log_every_n == 0:
             self.get_logger().info(
-                f'state={self.State.name} area={area:.3f} ex={diff_x:+.2f} ey={diff_y:+.2f} '
+                f'state={self.State.name} size={size:.3f} ex={diff_x:+.2f} ey={diff_y:+.2f} '
                 f'circ={circle_percent:.2f} depth={self.depth} hold={self.depth_hold_enabled} '
                 f'x: {tw.linear.x}, y: {tw.linear.y}, z: {tw.linear.z}, ang_z: {tw.angular.z}'
             )
 
         # ---- Apply deadbands just before publishing ----
-        # If x error is tiny, don't yaw/strafe
         if abs(diff_x) < self.eps:
             tw.angular.z = 0.0
             tw.linear.y = 0.0
 
-        # If NOT depth-holding and y error is tiny, don't heave
         if (not self.depth_hold_enabled) and (abs(diff_y) < self.eps):
             tw.linear.z = 0.0
 
