@@ -9,6 +9,7 @@
 
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
+  <depend>transformers</depend>
   <build_depend>bluerov_interfaces</build_depend>
 
   <exec_depend>bluerov_interfaces</exec_depend>

@@ -32,6 +32,7 @@ class Bridge(Node):
         self.adjusting_pitch = False  # Needed for pitch servo callback
         self.servo_cmd = False
         self.driving = False
+        self.teleop = False
 
         # Declare params
         self.declare_parameter('publish_rate_hz', 20.0)
@@ -136,12 +137,13 @@ class Bridge(Node):
             self.calibrate_bot
         )
 
-        # Testing services
-        # self.test_pitch = self.create_service(
-        #     Empty,
-        #     'test_pitch',
-        #     self.adjust_pitch(30.0)
-        # )
+        # Service to stop publishing from ROS and enable teleop
+        self.teleop_srv = self.create_service(
+            Empty,
+            'teleop',
+            self.toggle_teleop
+        )
+
         # Create Timers
         self.manual_timer = self.create_timer(
             1/rate,
@@ -172,6 +174,7 @@ class Bridge(Node):
         """Subscribe to twist messages from user."""
         self.last_cmd = msg
         self.last_cmd_time = self.get_clock().now()
+        # self.get_logger().info("Recieved msg")
 
     def send_servo_command(self):
         if not self.servo_cmd:
@@ -229,6 +232,16 @@ class Bridge(Node):
         else:
             self.brightness = 0.0
         self.get_logger().info('Toggling lights')
+        return response
+    
+    def toggle_teleop(self, request, response):
+        """Toggle the automatic zero commands to enable teleop."""
+        if not self.teleop:
+            self.teleop = True
+            self.get_logger().info('Switching to teleop')
+        else:
+            self.teleop = False
+            self.get_logger().info('Switching back to bridge control')
         return response
 
     def open_gripper(self, request, response):
@@ -352,6 +365,7 @@ class Bridge(Node):
         ovrd.channels[9] = int(pwm)
         # self.get_logger().info(f'pwm is {pwm}')
         self.lights_pub.publish(ovrd)
+
         self.manual_pub.publish(mc)
 
 

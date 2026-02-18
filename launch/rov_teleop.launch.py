@@ -2,11 +2,14 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+import os
 
 
 def generate_launch_description():
     fcu_url = LaunchConfiguration('fcu_url')
     gcs_url = LaunchConfiguration('gcs_url')
+    # ws = os.path.expanduser('~/Winter_Project/ros_ws')
+    # venv_python = os.path.join(ws, '.venv', 'bin', 'python')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -58,4 +61,8 @@ def generate_launch_description():
             name='control_node',
             output='screen',
         ),
+        # ExecuteProcess(
+        #     cmd=[venv_python, '-m', 'bluerov_control.Depth_Estimator'],
+        #     output='screen'
+        # ),
     ])
