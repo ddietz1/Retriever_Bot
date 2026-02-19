@@ -48,9 +48,9 @@ class PID:
         self.derivative_filtered = (self.derivative_alpha * derivative_raw + 
                                     (1 - self.derivative_alpha) * self.derivative_filtered)
         D_term = self.Kd * self.derivative_filtered
-
+        self.derivative_err_last = error
         if forward:
-            print(f'Terms are P: {P_term}, I: {I_term}')
+            print(f'Terms are P: {P_term:.3f}, D: {D_term:.3f}, I: {I_term:.3f}')
 
         return max(-1.0, min(1.0, P_term + I_term + D_term))
     

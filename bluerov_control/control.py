@@ -65,11 +65,11 @@ class Controller(Node):
         self.State = State.IDLE
 
         # Declare params for PID control constants
-        self.declare_parameter("PID_forward.kp", 0.14)
-        self.declare_parameter("PID_forward.ki", 0.03) # 0.025
-        self.declare_parameter("PID_forward.kd", 0.02) # 0.025
+        self.declare_parameter("PID_forward.kp", 0.135)
+        self.declare_parameter("PID_forward.ki", 0.0234) # 0.025
+        self.declare_parameter("PID_forward.kd", 0.025) # 0.025
 
-        self.declare_parameter("PID_vertical.kp", -0.18) # 0.17
+        self.declare_parameter("PID_vertical.kp", -0.188) # 0.17
         self.declare_parameter("PID_vertical.ki", -0.005) # 0.005
         self.declare_parameter("PID_vertical.kd", 0.0) # 0.051
 
@@ -116,7 +116,7 @@ class Controller(Node):
 
         # --- "size" thresholds (msg.area) ---
         # Treat msg.area as "size_norm" in [0,1] (stable close metric)
-        self.target_size = 0.7  # close enough to grab (tune in water)
+        self.target_size = 0.68  # close enough to grab (tune in water)
         self.far_size = 0.2    # far/close transition (tune)
         # self.close_size = 0.18  # close/near transition (tune)
 
@@ -599,9 +599,9 @@ class Controller(Node):
         # --- RING_DETECTED ---
         elif self.State == State.RING_DETECTED:
             # ---- Depth-hold latch logic (ONLY in RING_DETECTED) ----
-            self.PID_horizontal.reset()
-            self.PID_forward.reset()
-            self.PID_vertical.reset()
+            # self.PID_horizontal.reset()
+            # self.PID_forward.reset()
+            # self.PID_vertical.reset()
             if detected and (self.depth is not None):
                 # Enter depth hold after |diff_y| is 'good' for N frames
                 if (not self.depth_hold_enabled) and (abs(diff_y) < self.y_on):
@@ -630,11 +630,7 @@ class Controller(Node):
             diff_size = max(0.0, self.target_size - size)
 
             # --- Approach logic based on stable size metric ---
-            if 0.0 < size < self.far_size:  # far
-                tw.angular.z = self.PID_horizontal.update(diff_x)
-                tw.linear.x = self.PID_forward.update(diff_size, forward=True)
-
-            elif self.far_size <= size < self.target_size:  # near: align to gripper offset
+            if size < self.target_size:  # near: align to gripper offset
                 tw.linear.y = self.PID_horizontal.update(diff_x)  # Removing x offset for now
                 tw.linear.x = self.PID_forward.update(diff_size, forward=True)
                 tw.angular.z = self.PID_horizontal.update(diff_x)
@@ -663,7 +659,7 @@ class Controller(Node):
         # --- GRABBING ---
         elif self.State == State.GRABBING:
             diff_size = max(0.0, self.target_size - size)
-            if self.grabbing_timer < 15:
+            if self.grabbing_timer < 10:
                 tw.linear.x = self.PID_forward.update(diff_size)  # Keep moving forward, will slip otherwise
                 self.grabbing_timer += 1
             else:
