@@ -20,7 +20,10 @@ class PID:
         self.derivative_alpha = 0.2
         self.derivative_err_last = None
 
-    def update(self, error):
+        # --- Integral error testing ---
+        self.int_error_cnt = 0
+
+    def update(self, error, forward=None):
         """Update the Twist based on current error."""
 
         # Proportional(Should be the same as current controller)
@@ -28,7 +31,14 @@ class PID:
 
         if abs(error) > 0.05:
             self.integral_err += (error * self.dt)
+        
+        # NEW: If integral has wrong sign relative to error, decay it fast
+        if (error > 0 and self.integral_err < 0) or (error < 0 and self.integral_err > 0):
+            # Integral fighting the error direction - decay it
+            self.integral_err *= 0.5  # Decay by 50% each cycle
+
         self.integral_err = max(-1.0, min(1.0, self.integral_err))
+        # print(f'integral gain is {self.integral_err}')
         I_term = self.Ki * self.integral_err  # Clamp bounds to prevent overshoot
 
         # D term requires slope(difference between current and most recent error)
@@ -38,6 +48,9 @@ class PID:
         self.derivative_filtered = (self.derivative_alpha * derivative_raw + 
                                     (1 - self.derivative_alpha) * self.derivative_filtered)
         D_term = self.Kd * self.derivative_filtered
+
+        if forward:
+            print(f'Terms are P: {P_term}, I: {I_term}')
 
         return max(-1.0, min(1.0, P_term + I_term + D_term))
     

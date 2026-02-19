@@ -65,17 +65,17 @@ class Controller(Node):
         self.State = State.IDLE
 
         # Declare params for PID control constants
-        self.declare_parameter("PID_forward.kp", 0.135)
-        self.declare_parameter("PID_forward.ki", 0.025) # 0.017
-        self.declare_parameter("PID_forward.kd", 0.025) # 0.025
+        self.declare_parameter("PID_forward.kp", 0.14)
+        self.declare_parameter("PID_forward.ki", 0.03) # 0.025
+        self.declare_parameter("PID_forward.kd", 0.02) # 0.025
 
-        self.declare_parameter("PID_vertical.kp", 0.02) # 0.17
-        self.declare_parameter("PID_vertical.ki", 0.005) # 0.017
-        self.declare_parameter("PID_vertical.kd", 0.051) # 0.051
+        self.declare_parameter("PID_vertical.kp", -0.18) # 0.17
+        self.declare_parameter("PID_vertical.ki", -0.005) # 0.005
+        self.declare_parameter("PID_vertical.kd", 0.0) # 0.051
 
-        self.declare_parameter("PID_horizontal.kp", 0.17) #0.17
-        self.declare_parameter("PID_horizontal.ki", 0.01) # 0.017
-        self.declare_parameter("PID_horizontal.kd", 0.02) # 0.048
+        self.declare_parameter("PID_horizontal.kp", 0.16) #0.17
+        self.declare_parameter("PID_horizontal.ki", 0.0) # 0.01
+        self.declare_parameter("PID_horizontal.kd", 0.005) # 0.02
 
         # Control constants (tune)
         # --- Trying with just dt = 0.05
@@ -116,7 +116,7 @@ class Controller(Node):
 
         # --- "size" thresholds (msg.area) ---
         # Treat msg.area as "size_norm" in [0,1] (stable close metric)
-        self.target_size = 0.83  # close enough to grab (tune in water)
+        self.target_size = 0.7  # close enough to grab (tune in water)
         self.far_size = 0.2    # far/close transition (tune)
         # self.close_size = 0.18  # close/near transition (tune)
 
@@ -161,7 +161,7 @@ class Controller(Node):
         self.test_initial_error = None
 
         # Logging throttle
-        self.log_every_n = 40
+        self.log_every_n = 10
         self.log_count = 0
 
         # Depth state
@@ -184,6 +184,13 @@ class Controller(Node):
             '/mavros/global_position/rel_alt',
             self.get_alt,
             QOS_DEPTH,
+        )
+
+        self.mag_sub = self.create_subscription(
+            MagneticField,
+            '/mavros/imu/mag',
+            self.mag_callback,
+            QOS_DEPTH
         )
 
         # Publisher
@@ -283,6 +290,7 @@ class Controller(Node):
         """
         # Calculate error with wrap-around handling
         error = target_heading - current_heading
+        # self.get_logger().info(f'error is {error}')
         
         # Handle wrap-around (take shortest path)
         if error > 180:
@@ -291,8 +299,11 @@ class Controller(Node):
             error += 360
         
         # Proportional control with saturation
-        yaw_command = self.Kp_heading * error / 180.0  # Normalize to -1 to 1
-        yaw_command = max(-1.0, min(1.0, yaw_command))
+        if abs(error) > 1.5:
+            yaw_command = self.Kp_heading * error / 180.0  # Normalize to -1 to 1
+            yaw_command = max(-1.0, min(1.0, yaw_command))
+        else:
+            yaw_command = 0.0
         
         return yaw_command
 
@@ -430,7 +441,7 @@ class Controller(Node):
         # --- TESTING ---
 
         # Testing heading control for lawnmover search
-        
+
         if self.State == State.TESTING_FORWARD:
             # Start a timer once the testing has started
             if not self.test_timer_started:
@@ -440,12 +451,12 @@ class Controller(Node):
                 self.test_initial_size = size
                 self.get_logger().info(f'Starting forward test: initial_size={size:.3f}')
 
-            diff_size = 0.6 - size  # Setting this to 0.6 to see what the overshoot is like
+            diff_size = 0.85 - size  # Setting this to 0.6 to see what the overshoot is like
 
-            tw.linear.x = self.P_forward * diff_size
-            tw.linear.y = self.P_strafe * diff_x  # Keep centered horizontally
-            tw.linear.z = self.P_heave * diff_y # Keep centered vertically
-            tw.angular.z = self.P_yaw * diff_x
+            tw.linear.x = self.PID_forward.update(diff_size, forward=True)
+            tw.linear.y = self.PID_horizontal.update(diff_x)  # Keep centered horizontally
+            tw.linear.z = self.PID_vertical.update(diff_y) # Keep centered vertically
+            tw.angular.z = self.PID_horizontal.update(diff_x)
 
             if abs(diff_size) < 0.1:
                 self.test_forward_count += 1
@@ -492,10 +503,10 @@ class Controller(Node):
 
             diff_size = 0.6 - size  # Setting this to 0.6 to see what the overshoot is like
 
-            tw.linear.x = self.P_forward * diff_size
-            tw.linear.y = self.P_strafe * diff_x
-            tw.linear.z = self.P_heave * diff_y # Keep centered vertically
-            tw.angular.z = self.P_yaw * diff_x
+            tw.linear.x = self.PID_forward.update(diff_size, forward=True)
+            tw.linear.y = self.PID_horizontal.update(diff_x)
+            tw.linear.z = self.PID_vertical.update(diff_y) # Keep centered vertically
+            tw.angular.z = self.PID_horizontal.update(diff_x)
 
             if abs(diff_x) < 0.05:
                 self.test_forward_count += 1
@@ -541,10 +552,10 @@ class Controller(Node):
 
             diff_size = 0.6 - size  # Setting this to 0.6 to see what the overshoot is like
 
-            tw.linear.x = self.P_forward * diff_size
-            tw.linear.z = self.P_heave * diff_y
-            tw.linear.y = self.P_strafe * diff_x  # Keep centered horizontally
-            tw.angular.z = self.P_yaw * diff_x
+            tw.linear.x = self.PID_forward.update(diff_size)
+            tw.linear.z = self.PID_vertical.update(diff_y)
+            tw.linear.y = self.PID_horizontal.update(diff_x)  # Keep centered horizontally
+            tw.angular.z = self.PID_horizontal.update(diff_x)
 
             if abs(diff_y) < 0.1:
                 self.test_forward_count += 1
@@ -581,11 +592,16 @@ class Controller(Node):
 
         # --- SEARCHING ---
         if self.State == State.SEARCHING:
-            tw.angular.z = 0.0
+            yaw = self.heading_controller(self.current_heading, self.target_heading)
+            tw.angular.z = 0.0  # Keep an even keel
+            tw.linear.x = 0.0  # Move forward slightly
 
         # --- RING_DETECTED ---
         elif self.State == State.RING_DETECTED:
             # ---- Depth-hold latch logic (ONLY in RING_DETECTED) ----
+            self.PID_horizontal.reset()
+            self.PID_forward.reset()
+            self.PID_vertical.reset()
             if detected and (self.depth is not None):
                 # Enter depth hold after |diff_y| is 'good' for N frames
                 if (not self.depth_hold_enabled) and (abs(diff_y) < self.y_on):
@@ -616,12 +632,12 @@ class Controller(Node):
             # --- Approach logic based on stable size metric ---
             if 0.0 < size < self.far_size:  # far
                 tw.angular.z = self.PID_horizontal.update(diff_x)
-                tw.linear.x = self.PID_forward.update(diff_size)
+                tw.linear.x = self.PID_forward.update(diff_size, forward=True)
 
             elif self.far_size <= size < self.target_size:  # near: align to gripper offset
                 tw.linear.y = self.PID_horizontal.update(diff_x)  # Removing x offset for now
-                tw.linear.x = self.PID_forward.update(diff_size)
-                tw.linear.z = self.PID_vertical.update(diff_y)
+                tw.linear.x = self.PID_forward.update(diff_size, forward=True)
+                tw.angular.z = self.PID_horizontal.update(diff_x)
                 self.within_reach_counter = 0
 
             else:  # size >= target_size => candidate grab zone
@@ -695,7 +711,8 @@ class Controller(Node):
             )
 
         # ---- Apply deadbands just before publishing ----
-        if abs(diff_x) < self.eps:
+        if (abs(diff_x) < self.eps) and self.State != State.SEARCHING:
+            # self.get_logger().info("deadband hit")
             tw.angular.z = 0.0
             tw.linear.y = 0.0
 
