@@ -2,12 +2,14 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch.conditions import IfCondition
 import os
 
 
 def generate_launch_description():
     fcu_url = LaunchConfiguration('fcu_url')
     gcs_url = LaunchConfiguration('gcs_url')
+    use_yolo = LaunchConfiguration('use_yolo')
     # ws = os.path.expanduser('~/Winter_Project/ros_ws')
     # venv_python = os.path.join(ws, '.venv', 'bin', 'python')
 
@@ -21,6 +23,11 @@ def generate_launch_description():
             'gcs_url',
             default_value='udp://192.168.2.2:14551',
             description='MAVLink GCS URL for MAVROS router forwarding (e.g. udp://192.168.2.2:14551)'
+        ),
+        DeclareLaunchArgument(
+            'use_yolo',
+            default_value=True,
+            description='Determines if YOLO detection or object detection is used.'
         ),
 
         # Start MAVROS (now forwarding to gcs_url as well)
@@ -48,6 +55,7 @@ def generate_launch_description():
             executable='object_detect',
             name='object_detection',
             output='screen',
+            condition=IfCondition(not use_yolo),
         ),
         Node(
             package='bluerov_control',
@@ -61,6 +69,19 @@ def generate_launch_description():
             name='control_node',
             output='screen',
         ),
+        Node(
+            package='bluerov_control',
+            executable='yolo_node',
+            name='yolo_node',
+            output='screen',
+            condition=IfCondition(use_yolo),
+        ),
+        # Node(
+        #     package='magnetometer_compass',
+        #     executable='magnetometer_compass_node',
+        #     name='magnetometer_compass',
+        #     remappings=[("/imu", "/mavros/imu/data"),("/mag", "/mavros/imu/mag"),]
+        # )
         # ExecuteProcess(
         #     cmd=[venv_python, '-m', 'bluerov_control.Depth_Estimator'],
         #     output='screen'

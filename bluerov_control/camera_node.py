@@ -1,9 +1,8 @@
 import time
-
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import CompressedImage, Image
 from cv_bridge import CvBridge
 import numpy as np
 import cv2
@@ -31,22 +30,23 @@ class MJPEGCameraNode(Node):
     def __init__(self):
         super().__init__("camera_node")
 
-        self.pub = self.create_publisher(
+        # Publishers
+        self.pub_compressed = self.create_publisher(
             CompressedImage, 
             "/bluerov/camera/image_raw/compressed", 
             QOS_IMAGE
         )
-        self.bridge = CvBridge()
+        self.pub_raw = self.create_publisher(
+            Image, 
+            "/bluerov/camera/image_raw", 
+            QOS_IMAGE
+        )
 
+        self.bridge = CvBridge()
         self.last_sample_time = time.monotonic()
         self.restart_cooldown_until = 0.0
         
-        # Diagnostic counters
-        self.frame_count = 0
-        self.publish_count = 0
-        
-        # JPEG compression quality (0-100, higher = better quality but larger size)
-        # 80 is a good balance, adjust if needed
+        # JPEG compression quality
         self.jpeg_quality = 95
 
         Gst.init(None)
@@ -61,9 +61,8 @@ class MJPEGCameraNode(Node):
 
         ret = self.pipeline.set_state(Gst.State.PLAYING)
         self.get_logger().info(f"GStreamer set_state PLAYING -> {ret.value_nick}")
-        # self.get_logger().info(f"Publishing compressed images with quality={self.jpeg_quality}")
 
-        # Watchdog timer to restart pipeline if it wedges
+        # Watchdog timer
         self.timer = self.create_timer(1.0, self.check_pipeline_health)
 
     def on_sample(self, sink):
@@ -82,29 +81,25 @@ class MJPEGCameraNode(Node):
             return Gst.FlowReturn.OK
 
         try:
-            # Copy frame data from GStreamer buffer
+            # Copy frame
             frame = np.frombuffer(mapinfo.data, dtype=np.uint8).reshape((height, width, 3)).copy()
             
-            # Update timestamp for watchdog
             self.last_sample_time = time.monotonic()
             
-            # Compress to JPEG
+            # --- Publish compressed ---
             _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
-            
-            # Create compressed message
-            msg = CompressedImage()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = "bluerov_camera"
-            msg.format = "jpeg"
-            msg.data = buffer.tobytes()
-            
-            self.pub.publish(msg)
-            
-            # Diagnostics
-            # self.frame_count += 1
-            # self.publish_count += 1
-            # if self.frame_count % 30 == 0:
-            #     self.get_logger().info(f"Received and published 30 compressed frames")
+            msg_compressed = CompressedImage()
+            msg_compressed.header.stamp = self.get_clock().now().to_msg()
+            msg_compressed.header.frame_id = "bluerov_camera"
+            msg_compressed.format = "jpeg"
+            msg_compressed.data = buffer.tobytes()
+            self.pub_compressed.publish(msg_compressed)
+
+            # --- Publish raw ---
+            msg_raw = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            msg_raw.header.stamp = self.get_clock().now().to_msg()
+            msg_raw.header.frame_id = "bluerov_camera"
+            self.pub_raw.publish(msg_raw)
                 
         finally:
             buf.unmap(mapinfo)
@@ -112,12 +107,10 @@ class MJPEGCameraNode(Node):
         return Gst.FlowReturn.OK
 
     def check_pipeline_health(self):
-        """Watchdog to restart pipeline if it stops receiving frames"""
+        """Restart pipeline if no frames received"""
         now = time.monotonic()
         if now - self.last_sample_time > 3.0 and now > self.restart_cooldown_until:
-            self.get_logger().warn(
-                f"No frames for {now - self.last_sample_time:.2f}s, restarting pipeline"
-            )
+            self.get_logger().warn(f"No frames for {now - self.last_sample_time:.2f}s, restarting pipeline")
             self.pipeline.set_state(Gst.State.NULL)
             self.pipeline.set_state(Gst.State.READY)
             self.pipeline.set_state(Gst.State.PLAYING)

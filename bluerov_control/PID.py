@@ -37,7 +37,10 @@ class PID:
             # Integral fighting the error direction - decay it
             self.integral_err *= 0.5  # Decay by 50% each cycle
 
-        self.integral_err = max(-1.0, min(1.0, self.integral_err))
+        if forward and (error < 0.2):
+            self.integral_err = max(-1.0, min(1.5, self.integral_err))
+        else:
+            self.integral_err = max(-1.0, min(1.0, self.integral_err))
         # print(f'integral gain is {self.integral_err}')
         I_term = self.Ki * self.integral_err  # Clamp bounds to prevent overshoot
 
@@ -49,8 +52,8 @@ class PID:
                                     (1 - self.derivative_alpha) * self.derivative_filtered)
         D_term = self.Kd * self.derivative_filtered
         self.derivative_err_last = error
-        if forward:
-            print(f'Terms are P: {P_term:.3f}, D: {D_term:.3f}, I: {I_term:.3f}')
+        #if forward:
+        #    print(f'Terms are P: {P_term:.3f}, D: {D_term:.3f}, I: {I_term:.3f}')
 
         return max(-1.0, min(1.0, P_term + I_term + D_term))
     
