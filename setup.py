@@ -33,7 +33,9 @@ setup(
             'object_detect = bluerov_control.object_detection:main',
             'control_node = bluerov_control.control:main',
             'Depth_Estimator = bluerov_control.Depth_Estimator:main',
-            'yolo_node = bluerov_control.YoloDetection:main'
+            'yolo_node = bluerov_control.yolo_detect:main',
+            'heading_node = bluerov_heading.heading_node:main',
+            'bag_image_viewer = bluerov_control.bag_image_viewer:main'
         ],
     },
 )

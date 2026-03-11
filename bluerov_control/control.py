@@ -28,7 +28,7 @@ from bluerov_control.PID import PID
 
 from mavros_msgs.srv import SetMode
 
-from vision_msgs.msg import Detection2DArray
+from vision_msgs.msg import Detection2DArray, BoundingBox2D
 
 
 QOS_IMAGE = QoSProfile(
@@ -69,21 +69,21 @@ class Controller(Node):
         self.State = State.IDLE
 
         # Declare params for PID control constants
-        self.declare_parameter("PID_forward.kp", 0.135)
+        self.declare_parameter("PID_forward.kp", 0.132)
         self.declare_parameter("PID_forward.ki", 0.0241) # 0.025
         self.declare_parameter("PID_forward.kd", 0.025) # 0.025
 
-        self.declare_parameter("PID_vertical.kp", -0.193) # 0.17
+        self.declare_parameter("PID_vertical.kp", -0.2) # 0.17
         self.declare_parameter("PID_vertical.ki", -0.005) # 0.005
         self.declare_parameter("PID_vertical.kd", 0.0) # 0.051
 
-        self.declare_parameter("PID_horizontal.kp", 0.16) #0.17
-        self.declare_parameter("PID_horizontal.ki", 0.0) # 0.01
+        self.declare_parameter("PID_horizontal.kp", 0.1) #0.17
+        self.declare_parameter("PID_horizontal.ki", 0.001) # 0.01
         self.declare_parameter("PID_horizontal.kd", 0.005) # 0.02
 
-        self.declare_parameter("PID_heading.kp", 0.16)
-        self.declare_parameter("PID_heading.ki", 0.0)
-        self.declare_parameter("PID_heading.kd", 0.015)
+        self.declare_parameter("PID_heading.kp", 0.14) # 0.16
+        self.declare_parameter("PID_heading.ki", 0.001)
+        self.declare_parameter("PID_heading.kd", 0.005) # 0.015
 
         # Control constants (tune)
         # --- Trying with just dt = 0.05
@@ -132,9 +132,9 @@ class Controller(Node):
 
         # Gripper alignment / grab gating
         self.gripper_offset_x = 0.1  # Tested experimentally
-        self.grab_ex_tol = 0.45
+        self.grab_ex_tol = 0.25
         self.grab_ey_tol = 0.6
-        self.grab_frames_required = 10
+        self.grab_frames_required = 5
         self.within_reach_counter = 0
 
         # Depth hold (tune)
@@ -171,7 +171,7 @@ class Controller(Node):
         self.test_initial_error = None
 
         # Logging throttle
-        self.log_every_n = 10
+        self.log_every_n = 4
         self.log_count = 0
 
         # Depth state
@@ -180,16 +180,23 @@ class Controller(Node):
 
         # Searching logic
         self.search_timer_start = None
-        self.search_forward_duration = 5
-        self.search_side_duration = 3
+        self.search_forward_duration = 26
+        self.search_side_duration = 6
         # Set these from tests in pool
-        self.forward_heading = 86.6
-        self.right_heading = 154.0
-        self.backward_heading = None
-        self.left_heading = None
+        self.forward_heading = 3.75 # 4.6 from raw msg
+        self.right_heading = 3.35
+        self.backward_heading = 2.215
+        self.left_heading = 0.078
+
+        self.search_forward_speed = 0.08
+        self.search_sideways_speed = 0.01 # drift will add to this, tune
 
         self.init_decend = True
-        self.drift_offset = 0.0 # Test this
+        self.drift_offset = 0.04 # Test this
+
+        # Yolo params
+        self.detect_cnt = 0
+        self.yolo_target_size = 0.7
 
         # Callback group for service clients
         self.cb = MutuallyExclusiveCallbackGroup()
@@ -198,7 +205,7 @@ class Controller(Node):
         self.object_sub = self.create_subscription(
             Object,
             '/bluerov/ring/object',
-            self.controller,
+            self.object_cb,
             QOS_IMAGE,
         )
 
@@ -218,7 +225,7 @@ class Controller(Node):
 
         self.heading_sub = self.create_subscription(
             Float64,
-            '/mavros/global_position/compass_hdg',
+            '/rov/heading',
             self.heading_cb,
             QOS_DEPTH
         )
@@ -280,12 +287,53 @@ class Controller(Node):
             '/mavros/set_mode',
             callback_group=self.cb,
         )
+        self.startup_timer = self.create_timer(2.0, self._startup_mode_reset)
 
     # ---- Helper Functions ---- #
+
+    def _startup_mode_reset(self):
+        """Ensure we start in MANUAL mode, not ALT_HOLD."""
+        self.change_mode_('MANUAL')
+        self.get_logger().info('Startup mode reset to MANUAL')
+        # One-shot timer so we destroy it after firing
+        self.startup_timer.cancel()
     def yolo_cb(self, msg: Detection2DArray):
         '''Callback for yolo msgs.'''
-        for detection in msg.detections:
-            bbox = detection.bbox
+        # self.get_logger().info(f'callback!')
+        # Filter to detections above confidence threshold
+        valid_detections = [
+            d for d in msg.detections
+            if d.bbox.size_x > 0 and d.bbox.size_y > 0
+        ]
+        detect = len(valid_detections) > 0
+        if detect:
+            self.detect_cnt += 1
+            #self.get_logger().info('detected one')
+        else:
+            self.detect_cnt = 0
+
+        detected = self.detect_cnt > 20
+        if detect:
+            bbox = valid_detections[0].bbox  # Use first valid detection
+            raw_x = bbox.center.position.x
+            raw_y = bbox.center.position.y
+            size = (bbox.size_x / 640.0) * (bbox.size_y / 480.0)
+
+            center_x = (raw_x - (1280 / 2.0)) / (1280 / 2.0)
+            center_y = (raw_y - (720 / 2.0)) / (720 / 2.0)
+        else:
+            center_x = 0.0
+            center_y = 0.0
+            size = 0.0
+        self.controller(center_x, center_y, detected, size, yolo=True)
+
+    def object_cb(self, msg: Object):
+        '''Callback for Object msgs.'''
+        center_x = float(msg.cx)          # +right in camera frame
+        center_y = float(msg.cy)          # +down in camera frame
+        detected = bool(msg.detected)
+        size = float(msg.area)
+        self.controller(center_x, center_y, detected, size, yolo=False)
 
     def _service_cb(self, label: str):
         def _done_cb(fut):
@@ -310,6 +358,7 @@ class Controller(Node):
         """Gets heading from onboard magnetometer"""
         # Need to test in water to determine the proper headings for NSEW
         self.current_heading = msg.data
+        # self.get_logger().info(f'data is {self.current_heading}')
 
     def _apply_x_offset(self, x: float) -> float:
         """Once the ring is close, adjust x offset to ensure alignment."""
@@ -342,23 +391,17 @@ class Controller(Node):
         Returns yaw rate command (-1 to 1).
         """
         # Calculate error with wrap-around handling
-        error = (target_heading - current_heading + 180) % 360 - 180
-        # self.get_logger().info(f'error is {error}')
-        
-        # Handle wrap-around (take shortest path)
-        # if error > 180:
-        #     error -= 360
-        # elif error < -180:
-        #     error += 360
-        
-        # Proportional control with saturation
-        if abs(error) > 1.5:
+        error = (target_heading - current_heading + math.pi) % (2 * math.pi) - math.pi
+    
+        if abs(error) > 0.05:  # ~3 degrees in radians
             yaw_command = self.PID_heading.update(error)
-            yaw_command = max(-0.5, min(0.5, yaw_command)) # Dont thrash too much, error will be large
+            yaw_command = max(-0.2, min(0.2, yaw_command))
         else:
             yaw_command = 0.0
+        #self.get_logger().info(f'heading error={error:.3f} rad, yaw_cmd={yaw_command:.3f}')
         
-        return yaw_command
+        return -yaw_command
+
 
     def get_alt(self, msg: Float64):
         """Track current depth (rel_alt)."""
@@ -459,13 +502,15 @@ class Controller(Node):
             self.pitch_set_check = False
         if new_state == State.SEARCHING:
             # Start timer for lawnmower search logic
-            if self.search_timer_start is None:
-                self.search_timer_start = self.get_clock().now()
+            self.search_timer_start = None
             # stop holding depth while searching
             self.depth_hold_enabled = False
             self.depth_lock_counter = 0
         if new_state == State.DETECTED:
             # Disable depth hold
+            self.change_mode_('MANUAL')
+        if new_state == State.IDLE:
+            self.twist_pub.publish(Twist())
             self.change_mode_('MANUAL')
 
         # Reset PID terms
@@ -479,7 +524,7 @@ class Controller(Node):
         self._enter_state(State.SEARCHING)
 
         if not self.pitch_set_search:
-            self.call_pitch_service(-40.0)
+            self.call_pitch_service(-25.0)
             self.pitch_set_search = True
 
         if not self.lights_on:
@@ -489,16 +534,14 @@ class Controller(Node):
         self.call_grip_client(open_=True)
         return response
 
-    def controller(self, msg: Object):
+    def controller(self, center_x, center_y, detected, size, yolo):
         """Control the ROV based on object detection."""
-        center_x = float(msg.cx)          # +right in camera frame
-        center_y = float(msg.cy)          # +down in camera frame
-
+        # Call control node
         # IMPORTANT: size is a filtered close-range size metric in [0,1]
-        size = float(msg.area)
-
-        detected = bool(msg.detected)
-        circle_percent = float(msg.circularity)
+        if yolo:
+            target_size = self.yolo_target_size    # tune in pool tonight
+        else:
+            target_size = self.target_size
 
         # Always define diffs so deadband at end can't crash
         diff_x = center_x
@@ -673,47 +716,44 @@ class Controller(Node):
 
         # --- SEARCHING ---
         if self.State == State.SEARCHING:
-            tw.linear.x = 0.0
-            # if self.search_timer_start is None:
-            #     self.search_timer_start = self.get_clock().now()
-            # total_time = (self.get_clock().now() - self.search_timer_start).nanoseconds / 1e9
-            # # Move forward
-            # if total_time < self.search_forward_duration:
-            #     # TODO Might need to slowly approach the new heading to avoid thrashing
-            #     heading = self.forward_heading
-            #     tw.linear.y = -self.drift_offset
-            #     # Decend while moving forward
-            #     if self.init_decend:
-            #         tw.linear.z = -0.1
-            # # Move right
-            # elif total_time < (self.search_forward_duration + self.search_side_duration):
-            #     if self.init_decend:
-            #         # Set depth hold
-            #         self.change_mode_('ALT_HOLD')
-            #         self.init_decend = False
-            #     heading = self.right_heading
-            # # Move back
-            # elif total_time < (2*self.search_forward_duration + self.search_side_duration):
-            #     heading = self.backward_heading
-            #     tw.linear.y = self.drift_offset
-            # # Move left
-            # elif total_time < (2*self.search_forward_duration + 2*self.search_side_duration):
-            #     heading = self.left_heading
-            # else:
-            #     # Reset timer and start again
-            #     self.search_timer_start = self.get_clock().now()
-            #     return
+            heading = self.forward_heading
+            if self.search_timer_start is None:
+                self.search_timer_start = self.get_clock().now()
+            total_time = (self.get_clock().now() - self.search_timer_start).nanoseconds / 1e9
+            # Move forward
+            if total_time < self.search_forward_duration:
+                tw.linear.y = -self.drift_offset
+                # Decend while moving forward
+                if self.init_decend:
+                    tw.linear.z = -0.2
+                tw.linear.x = self.search_forward_speed
+            # Move right
+            elif total_time < (self.search_forward_duration + self.search_side_duration):
+                if self.init_decend:
+                    # Set depth hold
+                    self.change_mode_('ALT_HOLD')
+                    self.init_decend = False
+                tw.linear.y = self.search_sideways_speed
+            # Move back
+            elif total_time < (2*self.search_forward_duration + self.search_side_duration):
+                tw.linear.y = -self.drift_offset
+                tw.linear.x = -self.search_forward_speed
+            
+            elif total_time < (2*self.search_forward_duration + 2*self.search_side_duration):
+                tw.linear.y = self.search_sideways_speed
+            else:
+                # Reset timer and start again
+                self.search_timer_start = self.get_clock().now()
+                return
 
-            # if self.current_heading is None:
-            #     self.get_logger().info("There is no current heading")
-            #     return
-            # if heading is None:
-            #     self.get_logger().info("There is no target heading")
-            #     return
-            # yaw = self.heading_controller(self.current_heading, heading)
-            # if abs(yaw) < 0.3:  # Dont move forward again until the turn is complete
-            #     tw.linear.x = 0.1  # Move forward slightly
-            # tw.angular.z = yaw  # Keep an even keel
+            if self.current_heading is None:
+                self.get_logger().info("There is no current heading")
+                return
+            if heading is None:
+                self.get_logger().info("There is no target heading")
+                return
+            yaw = self.heading_controller(self.current_heading, heading)
+            tw.angular.z = yaw  # Keep an even keel
 
         # --- DETECTED ---
         elif self.State == State.DETECTED:
@@ -742,24 +782,21 @@ class Controller(Node):
             tw.linear.z = self.PID_vertical.update(diff_y)
 
             # Approach error: want size to increase to target_size
-            diff_size = max(0.0, self.target_size - size)
+            diff_size = max(0.0, target_size - size)
 
             # --- Approach logic based on stable size metric ---
-            if size < 0.8:  # near: align to gripper offset, changing to 0.8 from self.target_size 
-                tw.linear.y = self.PID_horizontal.update(diff_x)  # Removing x offset for now
+            if size < 0.65:  # near: align to gripper offset, changing to 0.8 from self.target_size 
+                tw.linear.y = self.PID_horizontal.update(self._apply_x_offset(diff_x))  # Removing x offset for now
                 tw.linear.x = self.PID_forward.update(diff_size, forward=True)
                 tw.angular.z = self.PID_horizontal.update(diff_x)
                 self.within_reach_counter = 0
 
             else:  # size >= target_size => candidate grab zone
-                centered = (abs(diff_x - 0.2) < self.grab_ex_tol) and (abs(diff_y) < self.grab_ey_tol)
+                centered = (abs(diff_x - 0.1) < self.grab_ex_tol) and (abs(diff_y) < self.grab_ey_tol)
 
                 if centered:
                     # Debounce grab condition for N frames
                     if self.within_reach_counter < self.grab_frames_required:
-                        tw.linear.y = self.PID_horizontal.update(diff_x)
-                        tw.linear.x = self.PID_forward.update(diff_size)
-                        tw.angular.z = self.PID_horizontal.update(diff_x)
                         self.within_reach_counter += 1
                     else:
                         self._enter_state(State.GRABBING)
@@ -767,13 +804,13 @@ class Controller(Node):
                 else:
                     # Not centered: keep trying to center
                     self.within_reach_counter = 0
-                    tw.linear.y = self.PID_horizontal.update(diff_x)
-                    tw.linear.x = self.PID_forward.update(diff_size)
-                    tw.angular.z = self.PID_horizontal.update(diff_x)
+                tw.linear.y = self.PID_horizontal.update(self._apply_x_offset(diff_x))
+                tw.linear.x = self.PID_forward.update(diff_size)
+                tw.angular.z = self.PID_horizontal.update(diff_x)
 
         # --- GRABBING ---
         elif self.State == State.GRABBING:
-            diff_size = max(0.0, self.target_size - size)
+            diff_size = max(0.0, target_size - size)
             if self.grabbing_timer < 10:
                 tw.linear.x = self.PID_forward.update(diff_size) + 0.055  # Keep moving forward, will slip otherwise
                 self.grabbing_timer += 1
@@ -816,8 +853,7 @@ class Controller(Node):
         self.log_count += 1
         if self.log_count % self.log_every_n == 0:
             self.get_logger().info(
-                f'state={self.State.name} size={size:.3f} ex={diff_x:+.2f} ey={diff_y:+.2f} '
-                f'circ={circle_percent:.2f} depth={self.depth} hold={self.depth_hold_enabled} '
+                f'state={self.State.name} size={size:.3f} ex={diff_x:+.2f} ey={diff_y:+.2f}'
                 f'x: {tw.linear.x}, y: {tw.linear.y}, z: {tw.linear.z}, ang_z: {tw.angular.z}'
             )
 

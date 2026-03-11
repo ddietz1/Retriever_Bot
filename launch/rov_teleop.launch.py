@@ -1,6 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, NotSubstitution
 from launch_ros.actions import Node
 from launch.conditions import IfCondition
 import os
@@ -26,7 +26,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'use_yolo',
-            default_value=True,
+            default_value='true',
             description='Determines if YOLO detection or object detection is used.'
         ),
 
@@ -55,7 +55,7 @@ def generate_launch_description():
             executable='object_detect',
             name='object_detection',
             output='screen',
-            condition=IfCondition(not use_yolo),
+            condition=IfCondition(NotSubstitution(use_yolo)),
         ),
         Node(
             package='bluerov_control',
@@ -76,6 +76,12 @@ def generate_launch_description():
             output='screen',
             condition=IfCondition(use_yolo),
         ),
+        Node(
+            package='bluerov_heading',
+            executable='heading_node',
+            name='heading_node',
+            output='screen',
+        )
         # Node(
         #     package='magnetometer_compass',
         #     executable='magnetometer_compass_node',
