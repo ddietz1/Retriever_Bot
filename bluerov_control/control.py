@@ -69,7 +69,7 @@ class Controller(Node):
         self.State = State.IDLE
 
         # Declare params for PID control constants
-        self.declare_parameter("PID_forward.kp", 0.132)
+        self.declare_parameter("PID_forward.kp", 0.130)
         self.declare_parameter("PID_forward.ki", 0.0241) # 0.025
         self.declare_parameter("PID_forward.kd", 0.025) # 0.025
 
@@ -81,7 +81,7 @@ class Controller(Node):
         self.declare_parameter("PID_horizontal.ki", 0.001) # 0.01
         self.declare_parameter("PID_horizontal.kd", 0.005) # 0.02
 
-        self.declare_parameter("PID_heading.kp", 0.14) # 0.16
+        self.declare_parameter("PID_heading.kp", 0.5) # 0.16
         self.declare_parameter("PID_heading.ki", 0.001)
         self.declare_parameter("PID_heading.kd", 0.005) # 0.015
 
@@ -132,7 +132,7 @@ class Controller(Node):
 
         # Gripper alignment / grab gating
         self.gripper_offset_x = 0.1  # Tested experimentally
-        self.grab_ex_tol = 0.25
+        self.grab_ex_tol = 0.3
         self.grab_ey_tol = 0.6
         self.grab_frames_required = 5
         self.within_reach_counter = 0
@@ -180,10 +180,10 @@ class Controller(Node):
 
         # Searching logic
         self.search_timer_start = None
-        self.search_forward_duration = 26
+        self.search_forward_duration = 15
         self.search_side_duration = 6
         # Set these from tests in pool
-        self.forward_heading = 3.75 # 4.6 from raw msg
+        self.forward_heading = 4.6 # 4.6 from raw msg
         self.right_heading = 3.35
         self.backward_heading = 2.215
         self.left_heading = 0.078
@@ -393,9 +393,9 @@ class Controller(Node):
         # Calculate error with wrap-around handling
         error = (target_heading - current_heading + math.pi) % (2 * math.pi) - math.pi
     
-        if abs(error) > 0.05:  # ~3 degrees in radians
+        if abs(error) > 0.01:  # ~3 degrees in radians
             yaw_command = self.PID_heading.update(error)
-            yaw_command = max(-0.2, min(0.2, yaw_command))
+            yaw_command = max(-0.4, min(0.4, yaw_command))
         else:
             yaw_command = 0.0
         #self.get_logger().info(f'heading error={error:.3f} rad, yaw_cmd={yaw_command:.3f}')
@@ -501,6 +501,7 @@ class Controller(Node):
             self.checking_timer = 0
             self.pitch_set_check = False
         if new_state == State.SEARCHING:
+            self.change_mode_('MANUAL')
             # Start timer for lawnmower search logic
             self.search_timer_start = None
             # stop holding depth while searching

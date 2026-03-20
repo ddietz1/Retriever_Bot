@@ -114,7 +114,7 @@ class BagImageViewer(Node):
             cx_norm = (cx_px - (IMG_W / 2.0)) / (IMG_W / 2.0)
             cy_norm = (cy_px - (IMG_H / 2.0)) / (IMG_H / 2.0)
             size_norm = (w_px / 640.0) * (h_px / 480.0)
-            aspect = w_px / h_px if h_px > 0 else 0
+            # aspect = w_px / h_px if h_px > 0 else 0
 
             self.csv_writer.writerow([
                 self.frame_count, f'{timestamp_sec:.4f}',
@@ -122,7 +122,7 @@ class BagImageViewer(Node):
                 f'{cx_norm:.4f}', f'{cy_norm:.4f}',
                 f'{w_px:.1f}', f'{h_px:.1f}',
                 f'{size_norm:.5f}',
-                f'{aspect:.3f}',
+                # f'{aspect:.3f}',
                 detected
             ])
 
@@ -130,7 +130,7 @@ class BagImageViewer(Node):
             cv2.putText(frame, f'cx={cx_norm:.2f} cy={cy_norm:.2f}',
                         (int(cx_px), int(cy_px) - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            cv2.putText(frame, f'size={size_norm:.4f} ar={aspect:.2f}',
+            cv2.putText(frame, f'size={size_norm:.4f} ',
                         (int(cx_px), int(cy_px) + 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
